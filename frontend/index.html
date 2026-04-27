@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LangChainRust Demo</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>LangChainRust Demo</h1>
+            <p class="subtitle">向量搜索测试平台</p>
+        </header>
+
+        <nav class="tabs">
+            <button class="tab active" data-tab="upload">文件上传</button>
+            <button class="tab" data-tab="search">三种搜索</button>
+            <button class="tab" data-tab="test">精准度测试</button>
+        </nav>
+
+        <section class="stats-panel" id="stats-panel">
+            <div class="stat-card">
+                <span class="stat-value" id="stat-docs">--</span>
+                <span class="stat-label">向量文档</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="stat-bm25">--</span>
+                <span class="stat-label">BM25索引</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value" id="stat-dim">--</span>
+                <span class="stat-label">向量维度</span>
+            </div>
+        </section>
+
+        <main class="content">
+            <!-- 上传面板 -->
+            <section class="panel" id="upload-panel">
+                <div class="upload-zone" id="upload-zone">
+                    <input type="file" id="file-input" accept=".txt,.pdf,.md,.json,.csv" hidden>
+                    <div class="upload-icon">📁</div>
+                    <p class="upload-text">点击或拖拽文件上传</p>
+                    <p class="upload-types">支持: TXT, PDF, MD, JSON, CSV</p>
+                </div>
+                <div class="upload-progress" id="upload-progress"></div>
+                <div class="upload-result" id="upload-result"></div>
+                <button class="btn btn-danger" id="btn-clear">清空所有文档</button>
+            </section>
+
+            <!-- 搜索面板 -->
+            <section class="panel hidden" id="search-panel">
+                <div class="search-modes">
+                    <button class="mode-btn" data-mode="vector">向量检索</button>
+                    <button class="mode-btn" data-mode="bm25">BM25检索</button>
+                    <button class="mode-btn active" data-mode="hybrid">混合检索</button>
+                    <button class="mode-btn" data-mode="compare">对比测试</button>
+                </div>
+                <div class="search-form">
+                    <input type="text" class="search-input" id="search-input" placeholder="输入搜索内容...">
+                    <input type="number" class="search-k" id="search-k" value="5" min="1" max="20">
+                    <button class="btn btn-primary" id="btn-search">搜索</button>
+                </div>
+                <div class="search-results" id="search-results"></div>
+            </section>
+
+            <!-- 测试面板 -->
+            <section class="panel hidden" id="test-panel">
+                <div class="test-actions">
+                    <button class="btn btn-primary" id="btn-test">运行精准度测试</button>
+                </div>
+                <div class="test-report" id="test-report"></div>
+            </section>
+        </main>
+
+        <footer class="footer">
+            <p>LangChainRust Demo - 三种搜索模式对比</p>
+            <p class="footer-sub">向量检索 | BM25检索 | RRF混合检索</p>
+        </footer>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script src="js/upload.js"></script>
+    <script src="js/search.js"></script>
+    <script src="js/test.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

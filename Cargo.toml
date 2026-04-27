@@ -1,0 +1,64 @@
+[package]
+name = "langchainrust-agent"
+version = "0.1.0"
+edition = "2021"
+description = "RAG对话系统 - 支持多种压缩策略（参考OpenCode方案）"
+authors = ["Your Name <your.email@example.com>"]
+license = "MIT"
+repository = "https://github.com/yourusername/langchainRustAgent"
+readme = "README.md"
+keywords = ["rag", "chat", "sqlite", "compression", "opencode"]
+categories = ["api-bindings", "database"]
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["multipart"] }
+tokio = { version = "1.0", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# File handling
+mime = "0.3"
+mime_guess = "2.0"
+
+# Async
+async-trait = "0.1"
+async-stream = "0.3"
+futures-util = "0.3"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1.10", features = ["v4", "v7", "serde"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Config file path handling
+dirs = "5.0"
+
+# MongoDB (BM25 文档存储)
+mongodb = "2.8"
+
+# SQLite (对话历史存储 - 参考 OpenCode)
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio", "tls-rustls"] }
+
+# Qdrant vector database
+qdrant-client = "1.17"
+
+# LangChainRust framework (local crate)
+langchainrust = { path = "crates/langchainrust", features = ["qdrant-integration", "mongodb-persistence"] }
+
+[features]
+default = []
