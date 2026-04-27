@@ -119,7 +119,7 @@ async fn main() {
         .route("/api/langgraph/stream", post(run_langgraph_stream))
         .route("/api/documents", get(list_documents))
         .route("/api/documents/:parent_id", post(delete_document))
-        .fallback_service(ServeDir::new("static"))
+        .fallback_service(ServeDir::new("frontend"))
         .layer(cors)
         .with_state(state);
     

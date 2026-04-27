@@ -31,7 +31,10 @@ langchainRustAgent/
 │   ├── qdrant_store.rs     # 向量存储
 │   ├── bm25_store.rs       # BM25检索
 │   └── hybrid_store.rs     # 混合检索
-├── static/                 # 前端文件
+├── frontend/              # 前端文件
+│   ├── index.html
+│   ├── css/
+│   └── js/
 └── scripts/                # 部署脚本
 ```
 
