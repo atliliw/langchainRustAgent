@@ -39,5 +39,8 @@ deploy_package/
 # Local crates (not for publishing)
 /crates/
 
+# Internal research docs (not for publishing)
+/internal/
+
 # Example config (keep this one)
 !config.toml.example

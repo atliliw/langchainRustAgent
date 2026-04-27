@@ -32,9 +32,7 @@ langchainRustAgent/
 │   ├── bm25_store.rs       # BM25检索
 │   └── hybrid_store.rs     # 混合检索
 ├── static/                 # 前端文件
-├── crates/                 # 本地 crate
-├── internal/               # 技术研究文档
-└── docs/                   # 文档
+└── scripts/                # 部署脚本
 ```
 
 ## 快速开始
@@ -58,8 +56,6 @@ open http://localhost:8080
 | [部署指南.md](部署指南.md) | 完整部署流程（三种检索模式） |
 | [使用指南.md](使用指南.md) | 功能使用说明 |
 | [AGENTS.md](AGENTS.md) | AI Agent 开发指南 |
-| [internal/](internal/) | 技术研究文档 |
-| [docs/PROMPT_HISTORY.md](docs/PROMPT_HISTORY.md) | Prompt 优化记录 |
 
 ## API 端点
 
