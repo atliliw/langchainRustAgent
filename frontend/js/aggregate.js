@@ -60,16 +60,21 @@ async function collectAll() {
     
     btn.disabled = true;
     btn.textContent = '⏳ 采集中...';
-    status.textContent = '正在采集GitHub、Hacker News、RSS、ArXiv...（可能需要几分钟）';
+    status.textContent = '正在采集GitHub、Hacker News、RSS、ArXiv...（后台运行，可刷新页面查看进度）';
     status.style.color = '#1e40af';
     
     try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 300000);
+        
         const response = await fetch('/api/aggregate/collect', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ sources: null, force: false }),
-            timeout: 300000
+            signal: controller.signal
         });
+        
+        clearTimeout(timeoutId);
         
         if (!response.ok) {
             const error = await response.json();
@@ -89,9 +94,14 @@ async function collectAll() {
         await loadAggregateList();
         
     } catch (error) {
-        status.textContent = `采集失败: ${error.message}`;
-        status.style.color = '#dc2626';
-        console.error('采集错误:', error);
+        if (error.name === 'AbortError') {
+            status.textContent = '采集正在后台运行，请稍后刷新页面查看结果';
+            status.style.color = '#d97706';
+            setInterval(loadAggregateStats, 10000);
+        } else {
+            status.textContent = `采集失败: ${error.message}`;
+            status.style.color = '#dc2626';
+        }
     }
     
     btn.disabled = false;

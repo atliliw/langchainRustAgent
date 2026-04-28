@@ -70,7 +70,7 @@ impl AggregateService {
         }
         
         for item in &all_items {
-            let summary = self.generate_item_summary(item).await?;
+            let summary = self.generate_item_summary(item).await.ok().unwrap_or_else(|| item.content.chars().take(200).collect());
             self.content_store.save_item_with_summary(item.clone(), &summary).await?;
         }
         
