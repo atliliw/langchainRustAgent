@@ -37,9 +37,6 @@ logs/
 # Deployment package (contains sensitive config and binaries)
 deploy_package/
 
-# Local crates (not for publishing)
-/crates/
-
 # Internal research docs (not for publishing)
 /internal/
 
