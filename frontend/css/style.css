@@ -196,6 +196,7 @@ pre { background: #f1f5f9; padding: 16px; border-radius: 8px; font-size: 12px; }
 .msg-btn:hover { background: rgba(0,0,0,0.2); }
 .delete-btn:hover { background: #fecaca; }
 .regen-btn:hover { background: #bfdbfe; }
+.branch-btn:hover { background: #d1fae5; }
 
 .doc-checkbox { cursor: pointer; }
 

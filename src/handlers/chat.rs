@@ -224,3 +224,11 @@ pub async fn search_sessions(
     let sessions = state.api.search_sessions(&request.query).await?;
     Ok(Json(sessions))
 }
+
+pub async fn branch_session(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<BranchRequest>,
+) -> Result<Json<BranchResponse>, ApiErrorResponse> {
+    let response = state.api.branch_session(&request.session_id, &request.from_message_id).await?;
+    Ok(Json(response))
+}

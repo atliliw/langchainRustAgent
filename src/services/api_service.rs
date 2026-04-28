@@ -416,4 +416,13 @@ impl ApiService {
         let documents = self.bm25_store.get_documents_by_tag(tag).await?;
         Ok(documents)
     }
+    
+    pub async fn branch_session(&self, session_id: &str, from_message_id: &str) -> Result<BranchResponse, ApiError> {
+        let (new_session_id, title, message_count) = self.conversation_store.branch_session(session_id, from_message_id).await?;
+        Ok(BranchResponse {
+            new_session_id,
+            title,
+            message_count,
+        })
+    }
 }

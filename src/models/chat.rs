@@ -149,3 +149,22 @@ pub struct ImportMessage {
 pub struct SessionSearchRequest {
     pub query: String,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BranchRequest {
+    pub session_id: String,
+    pub from_message_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BranchResponse {
+    pub new_session_id: String,
+    pub title: String,
+    pub message_count: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionListRequest {
+    pub page: Option<usize>,
+    pub limit: Option<usize>,
+}

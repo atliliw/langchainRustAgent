@@ -463,6 +463,7 @@ async function loadSession(sessionId) {
                     <button class="msg-btn copy-btn" onclick="copyMessage('${msgId}')">📋</button>
                     <button class="msg-btn edit-btn" onclick="editMessageUI('${msgId}')">✏️</button>
                     ${m.role === 'assistant' ? `<button class="msg-btn regen-btn" onclick="regenerateMessage('${msgId}')">🔄</button>` : ''}
+                    <button class="msg-btn branch-btn" onclick="branchSession('${sessionId}', '${msgId}')">🌿</button>
                     <button class="msg-btn delete-btn" onclick="deleteMessageUI('${msgId}')">🗑️</button>
                 </div>
                 <div class="time">${formatTime(m.time_created)}</div>
@@ -803,6 +804,24 @@ async function exportSession(sessionId) {
         URL.revokeObjectURL(url);
         showToast('会话已导出');
     } catch (e) { showToast('导出失败: ' + e.message); }
+}
+
+async function branchSession(sessionId, fromMsgId) {
+    if (!confirm('确定从此消息创建分支？')) return;
+    try {
+        const res = await fetch(`${API_BASE}/chat/session/branch`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({session_id: sessionId, from_message_id: fromMsgId})
+        });
+        const data = await res.json();
+        if (data.new_session_id) {
+            showToast(`已创建分支: ${data.title}`);
+            currentSessionId = data.new_session_id;
+            loadSession(data.new_session_id);
+            loadSessions();
+        }
+    } catch (e) { showToast('创建分支失败: ' + e.message); }
 }
 
 async function importSession() {

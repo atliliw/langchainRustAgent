@@ -822,4 +822,37 @@ impl ConversationStore {
         
         Ok(sessions)
     }
+    
+    pub async fn branch_session(&self, session_id: &str, from_message_id: &str) -> Result<(String, String, usize), ConversationError> {
+        let original_title = sqlx::query("SELECT title FROM session WHERE id = ?")
+            .bind(session_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| ConversationError::SqliteError(e.to_string()))?
+            .get::<String, _>(0);
+        
+        let messages = self.get_history(session_id).await?;
+        let cutoff_time = messages.iter()
+            .find(|m| m.id == from_message_id)
+            .map(|m| m.time_created)
+            .ok_or_else(|| ConversationError::InvalidOperation("消息不存在".to_string()))?;
+        
+        let new_session_id = uuid::Uuid::new_v4().to_string();
+        let new_title = format!("{} (分支)", original_title);
+        self.create_session(&new_session_id, &new_title).await?;
+        
+        let messages_to_copy: Vec<ConversationMessage> = messages.into_iter()
+            .filter(|m| m.time_created <= cutoff_time)
+            .collect();
+        
+        let count = messages_to_copy.len();
+        
+        for msg in messages_to_copy {
+            self.save_message(&new_session_id, &msg.role, &msg.content).await?;
+        }
+        
+        self.update_session_stats(&new_session_id).await?;
+        
+        Ok((new_session_id, new_title, count))
+    }
 }

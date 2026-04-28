@@ -71,6 +71,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             axum::routing::post(chat::search_sessions),
         )
         .route(
+            "/api/chat/session/branch",
+            axum::routing::post(chat::branch_session),
+        )
+        .route(
             "/api/chat/compress-modes",
             axum::routing::get(chat::get_compress_modes),
         )
