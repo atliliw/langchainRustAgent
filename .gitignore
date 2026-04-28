@@ -42,5 +42,8 @@ deploy_package/
 # Internal research docs (not for publishing)
 /internal/
 
+# Superpowers auto-generated docs
+/docs/superpowers/
+
 # Example config (keep this one)
 !config.toml.example

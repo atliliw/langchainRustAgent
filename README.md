@@ -26,15 +26,16 @@ RAG 对话系统，支持多种检索模式和对话压缩策略。
 langchainRustAgent/
 ├── src/                    # 后端源码
 │   ├── main.rs             # Axum 入口
-│   ├── api.rs              # API 服务
-│   ├── conversation_store.rs  # 对话存储+压缩
-│   ├── qdrant_store.rs     # 向量存储
-│   ├── bm25_store.rs       # BM25检索
-│   └── hybrid_store.rs     # 混合检索
-├── frontend/              # 前端文件
-│   ├── index.html
-│   ├── css/
-│   └── js/
+│   ├── handlers/           # API handlers
+│   ├── stores/             # 存储层
+│   ├── services/           # 服务层
+│   ├── models/             # 数据模型
+│   ├── routes/             # 路由定义
+│   └── agents/             # AI agents
+├── frontend/               # 前端文件（前后端分离）
+│   ├── index.html          # 主页面
+│   ├── css/style.css       # 样式
+│   └── js/app.js           # JavaScript
 └── scripts/                # 部署脚本
 ```
 
