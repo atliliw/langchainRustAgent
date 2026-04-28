@@ -1,7 +1,6 @@
 //! 文件上传处理函数
 
 use crate::config::Config;
-use crate::errors::ApiError;
 use crate::handlers::ApiErrorResponse;
 use crate::models::UploadResponse;
 use crate::services::ApiService;

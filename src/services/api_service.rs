@@ -4,8 +4,8 @@ use crate::config::Config;
 use crate::errors::ApiError;
 use crate::models::*;
 use crate::stores::*;
-use crate::utils::{DocumentProcessor, SearchTester};
-use langchainrust::SearchResult;
+use crate::utils::DocumentProcessor;
+use crate::services::LangGraphDemoService;
 use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -64,7 +64,7 @@ impl ApiService {
         
         let parent_documents: Vec<langchainrust::Document> = original_docs.into_iter()
             .enumerate()
-            .map(|(i, doc)| {
+            .map(|(_i, doc)| {
                 doc
                     .with_id(format!("parent_{}", Uuid::new_v4()))
                     .with_metadata("original_filename", original_name)
@@ -191,7 +191,7 @@ impl ApiService {
         let bm25_ids: Vec<String> = bm25_items.iter()
             .filter_map(|i| i.id.clone())
             .collect();
-        let hybrid_ids: Vec<String> = hybrid_items.iter()
+        let _hybrid_ids: Vec<String> = hybrid_items.iter()
             .filter_map(|i| i.id.clone())
             .collect();
         

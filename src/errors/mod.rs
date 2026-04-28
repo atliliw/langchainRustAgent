@@ -1,3 +1,4 @@
+pub mod agent_error;
 pub mod api_error;
 pub mod bm25_error;
 pub mod conversation_error;
@@ -7,6 +8,7 @@ pub mod process_error;
 pub mod store_error;
 pub mod test_error;
 
+pub use agent_error::AgentError;
 pub use api_error::ApiError;
 pub use bm25_error::BM25Error;
 pub use conversation_error::ConversationError;

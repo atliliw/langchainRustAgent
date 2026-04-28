@@ -3,7 +3,7 @@
 use crate::handlers::{AppState, ApiErrorResponse};
 use crate::models::*;
 use axum::{
-    extract::{State, Query},
+    extract::State,
     Json,
 };
 use std::sync::Arc;

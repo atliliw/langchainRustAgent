@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 
-pub struct ApiErrorResponse(StatusCode, String);
+pub struct ApiErrorResponse(pub StatusCode, pub String);
 
 impl IntoResponse for ApiErrorResponse {
     fn into_response(self) -> Response {

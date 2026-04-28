@@ -2,13 +2,14 @@
 
 use crate::config::Config;
 use crate::stores::QdrantStore;
-use crate::models::{TestCase, TestResult, PrecisionReport, PrecisionTestQuery};
+use crate::models::{TestCase, TestResult, PrecisionReport};
 use crate::errors::TestError;
 use langchainrust::Document;
 use std::sync::Arc;
 
 pub struct SearchTester {
     store: Arc<QdrantStore>,
+    #[allow(dead_code)]
     config: Config,
 }
 

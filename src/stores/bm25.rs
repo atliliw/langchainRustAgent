@@ -8,7 +8,7 @@ use langchainrust::{
     vector_stores::{MongoChunkedDocumentStore, MongoStoreConfig},
     Document,
 };
-use mongodb::{bson::doc, Client, options::ClientOptions};
+use mongodb::{Client, options::ClientOptions};
 use std::sync::{Arc, Mutex};
 
 pub struct BM25Store {

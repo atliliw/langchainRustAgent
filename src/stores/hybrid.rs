@@ -5,7 +5,7 @@ use crate::errors::HybridError;
 use crate::stores::{QdrantStore, BM25Store};
 use langchainrust::{
     Document,
-    retrieval::{HybridRetriever, RetrievedDocument},
+    retrieval::HybridRetriever,
 };
 use std::sync::Arc;
 

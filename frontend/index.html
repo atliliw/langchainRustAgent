@@ -3,86 +3,189 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LangChainRust Demo</title>
+    <title>LangChainRust Demo - 向量搜索 + RAG 对话</title>
     <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
     <div class="container">
-        <header class="header">
-            <h1>LangChainRust Demo</h1>
-            <p class="subtitle">向量搜索测试平台</p>
-        </header>
-
-        <nav class="tabs">
-            <button class="tab active" data-tab="upload">文件上传</button>
-            <button class="tab" data-tab="search">三种搜索</button>
-            <button class="tab" data-tab="test">精准度测试</button>
-        </nav>
-
-        <section class="stats-panel" id="stats-panel">
-            <div class="stat-card">
-                <span class="stat-value" id="stat-docs">--</span>
-                <span class="stat-label">向量文档</span>
+        <div class="sidebar">
+            <h1>LangChainRust</h1>
+            <div class="nav-menu">
+                <div class="nav-item active" onclick="showTab('upload')">📁 文件上传</div>
+                <div class="nav-item" onclick="showTab('documents')">📄 文档管理</div>
+                <div class="nav-item" onclick="showTab('bm25')">🔍 BM25搜索</div>
+                <div class="nav-item" onclick="showTab('vector')">🎯 向量搜索</div>
+                <div class="nav-item" onclick="showTab('compare')">⚡ 搜索对比</div>
+                <div class="nav-item" onclick="showTab('chat')">💬 RAG对话</div>
+                <div class="nav-item" onclick="showTab('langgraph')">🔗 LangGraph</div>
+                <div class="nav-item" onclick="showTab('sessions')">📋 会话列表</div>
             </div>
-            <div class="stat-card">
-                <span class="stat-value" id="stat-bm25">--</span>
-                <span class="stat-label">BM25索引</span>
+        </div>
+        
+        <div class="main-content">
+            <div class="card">
+                <h2>系统状态</h2>
+                <div id="stats-loading" class="loading">正在加载...</div>
+                <div id="stats-content" class="stats hidden">
+                    <div class="stat-item">
+                        <div class="value" id="total-docs">0</div>
+                        <div class="label">文档总数</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="value" id="vector-size">1536</div>
+                        <div class="label">向量维度</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="value" id="bm25-chunks">0</div>
+                        <div class="label">BM25 索引</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="value" id="sessions-count">0</div>
+                        <div class="label">对话会话</div>
+                    </div>
+                </div>
             </div>
-            <div class="stat-card">
-                <span class="stat-value" id="stat-dim">--</span>
-                <span class="stat-label">向量维度</span>
+        
+        <div id="upload-tab" class="card">
+            <h2>上传文档</h2>
+            <p style="color: #666; margin-bottom: 15px;">支持文件类型：TXT, PDF, MD, JSON, CSV</p>
+            <div class="upload-area" id="upload-area">
+                <p>点击或拖拽文件到此处上传</p>
+                <input type="file" id="file-input" style="display: none" accept=".txt,.pdf,.md,.json,.csv">
             </div>
-        </section>
-
-        <main class="content">
-            <!-- 上传面板 -->
-            <section class="panel" id="upload-panel">
-                <div class="upload-zone" id="upload-zone">
-                    <input type="file" id="file-input" accept=".txt,.pdf,.md,.json,.csv" hidden>
-                    <div class="upload-icon">📁</div>
-                    <p class="upload-text">点击或拖拽文件上传</p>
-                    <p class="upload-types">支持: TXT, PDF, MD, JSON, CSV</p>
+            <div id="upload-progress" class="progress hidden">
+                <div class="progress-bar" id="progress-bar"></div>
+            </div>
+            <div id="upload-result"></div>
+            <div style="margin-top: 20px;">
+                <button class="btn btn-danger" onclick="clearAll()">清空所有数据</button>
+            </div>
+        </div>
+        
+        <div id="documents-tab" class="card hidden">
+            <h2>文档管理</h2>
+            <p style="color: #666; margin-bottom: 15px;">查看已上传的文档，支持单独删除（BM25 + 向量同步清除）</p>
+            <div style="margin-bottom: 15px;">
+                <button class="btn" onclick="loadDocuments()">刷新列表</button>
+            </div>
+            <div id="documents-list" style="max-height: 500px; overflow-y: auto;"></div>
+        </div>
+        
+        <div id="bm25-tab" class="card hidden">
+            <h2>BM25 搜索</h2>
+            <p style="color: #666; margin-bottom: 15px;">关键词匹配搜索，适合精确术语查询</p>
+            <div class="search-box">
+                <input type="text" id="bm25-query" placeholder="输入搜索内容..." />
+                <button class="btn" onclick="bm25Search()">搜索</button>
+            </div>
+            <div style="margin-top: 10px; color: #666;">
+                <label>返回结果数量：</label>
+                <input type="number" id="bm25-top-k" value="5" min="1" max="20" style="width: 60px; padding: 5px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div id="bm25-results"></div>
+        </div>
+        
+        <div id="vector-tab" class="card hidden">
+            <h2>向量搜索</h2>
+            <p style="color: #666; margin-bottom: 15px;">语义相似搜索，适合概念理解和模糊表达</p>
+            <div class="search-box">
+                <input type="text" id="vector-query" placeholder="输入搜索内容..." />
+                <button class="btn" onclick="vectorSearch()">搜索</button>
+            </div>
+            <div style="margin-top: 10px; color: #666;">
+                <label>返回结果数量：</label>
+                <input type="number" id="vector-top-k" value="5" min="1" max="20" style="width: 60px; padding: 5px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div id="vector-results"></div>
+        </div>
+        
+        <div id="compare-tab" class="card hidden">
+            <h2>搜索对比测试</h2>
+            <p style="color: #666; margin-bottom: 15px;">对比三种搜索模式：向量检索、BM25检索、混合检索</p>
+            <div class="search-box">
+                <input type="text" id="compare-query" placeholder="输入搜索内容..." />
+                <button class="btn" onclick="compareSearch()">对比搜索</button>
+            </div>
+            <div style="margin-top: 10px; color: #666;">
+                <label>返回结果数量：</label>
+                <input type="number" id="compare-top-k" value="5" min="1" max="20" style="width: 60px; padding: 5px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div id="compare-results"></div>
+        </div>
+        
+        <div id="chat-tab" class="card hidden">
+            <h2>RAG 对话</h2>
+            <p style="color: #666; margin-bottom: 15px;">基于文档库的智能对话。选择搜索模式和对话压缩策略。</p>
+            <div class="chat-container">
+                <div class="chat-main">
+                    <div class="chat-options">
+                        <label><input type="checkbox" id="use-vector" />向量检索</label>
+                        <label><input type="checkbox" id="use-bm25" />BM25检索</label>
+                        <label style="color: #667eea; font-weight: bold;"><input type="checkbox" id="use-hybrid" />混合检索</label>
+                        <label style="color: #28a745; font-weight: bold;"><input type="checkbox" id="use-none" checked />纯对话（不使用RAG）</label>
+                        <label>结果数：<input type="number" id="rag-top-k" value="5" min="1" max="10" style="width: 50px; padding: 5px; border: 1px solid #ddd; border-radius: 4px;"></label>
+                    </div>
+                    <div class="chat-options" style="margin-top: 10px; border-top: 1px solid #eee; padding-top: 10px;">
+                        <span style="color: #666; font-size: 13px; margin-right: 10px;">对话压缩：</span>
+                        <select id="compress-mode" style="padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
+                            <option value="none">不压缩（完整历史）</option>
+                            <option value="sliding_window">滑动窗口（保留最近N条）</option>
+                            <option value="token_limit">Token限制（保护关键设定）</option>
+                            <option value="summary">摘要压缩（旧消息压缩为摘要）</option>
+                            <option value="layered">分层压缩（重要+摘要+最近）</option>
+                        </select>
+                        <span id="compress-hint" style="color: #999; font-size: 12px; margin-left: 10px;"></span>
+                    </div>
+                    <div class="chat-messages" id="chat-messages">
+                        <div style="text-align: center; color: #666; padding: 40px;">
+                            <p>开始新对话或选择历史会话</p>
+                            <p style="margin-top: 10px; font-size: 12px;">对话历史会自动保存</p>
+                        </div>
+                    </div>
+                    <div class="chat-input-area">
+                        <textarea id="chat-input" placeholder="输入消息..." onkeypress="handleKeyPress(event)"></textarea>
+                        <button class="btn" onclick="sendMessage()" id="send-btn">发送</button>
+                    </div>
                 </div>
-                <div class="upload-progress" id="upload-progress"></div>
-                <div class="upload-result" id="upload-result"></div>
-                <button class="btn btn-danger" id="btn-clear">清空所有文档</button>
-            </section>
-
-            <!-- 搜索面板 -->
-            <section class="panel hidden" id="search-panel">
-                <div class="search-modes">
-                    <button class="mode-btn" data-mode="vector">向量检索</button>
-                    <button class="mode-btn" data-mode="bm25">BM25检索</button>
-                    <button class="mode-btn active" data-mode="hybrid">混合检索</button>
-                    <button class="mode-btn" data-mode="compare">对比测试</button>
+                <div class="chat-sidebar">
+                    <button class="btn btn-small new-session-btn" onclick="newSession()">新建对话</button>
+                    <div style="font-size: 14px; color: #666; margin-bottom: 10px;">历史会话：</div>
+                    <div class="session-list" id="session-list"></div>
                 </div>
-                <div class="search-form">
-                    <input type="text" class="search-input" id="search-input" placeholder="输入搜索内容...">
-                    <input type="number" class="search-k" id="search-k" value="5" min="1" max="20">
-                    <button class="btn btn-primary" id="btn-search">搜索</button>
-                </div>
-                <div class="search-results" id="search-results"></div>
-            </section>
-
-            <!-- 测试面板 -->
-            <section class="panel hidden" id="test-panel">
-                <div class="test-actions">
-                    <button class="btn btn-primary" id="btn-test">运行精准度测试</button>
-                </div>
-                <div class="test-report" id="test-report"></div>
-            </section>
-        </main>
-
-        <footer class="footer">
-            <p>LangChainRust Demo - 三种搜索模式对比</p>
-            <p class="footer-sub">向量检索 | BM25检索 | RRF混合检索</p>
+            </div>
+        </div>
+        
+        <div id="langgraph-tab" class="card hidden">
+            <h2>LangGraph 多任务并行演示</h2>
+            <p style="color: #666; margin-bottom: 15px;">展示 StateGraph、并行执行(FanOut)、条件路由、流式事件</p>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px;">
+                <button class="btn" onclick="runParallelDemo()">并行执行演示</button>
+                <button class="btn" onclick="runConditionalDemo()">条件路由演示</button>
+                <button class="btn" onclick="runStreamDemo()">流式执行演示</button>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label>输入文本：</label>
+                <input type="text" id="langgraph-input" value="测试输入" style="width: 300px; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div id="langgraph-info" style="background: #f8f9ff; padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+                <h4 style="margin-bottom: 10px;">图结构信息</h4>
+                <pre id="graph-structure" style="font-size: 12px; white-space: pre-wrap;"></pre>
+            </div>
+            <div id="langgraph-results"></div>
+        </div>
+        
+        <div id="sessions-tab" class="card hidden">
+            <h2>会话管理</h2>
+            <div id="sessions-list"></div>
+        </div>
+        
+        <footer style="text-align: center; padding: 20px; color: #666; font-size: 13px;">
+            <p>LangChainRust Demo - 向量搜索 + BM25 + RAG对话 + LangGraph</p>
+            <p style="margin-top: 8px;">Powered by Qdrant + MongoDB + OpenAI</p>
         </footer>
+        </div>
     </div>
-
-    <script src="js/api.js"></script>
-    <script src="js/upload.js"></script>
-    <script src="js/search.js"></script>
-    <script src="js/test.js"></script>
+    
     <script src="js/app.js"></script>
 </body>
 </html>

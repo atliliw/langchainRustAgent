@@ -4,7 +4,7 @@ use crate::config::{Config, ConversationConfig};
 use crate::errors::ConversationError;
 use crate::models::{
     ChatRequest, ChatResponse, SessionInfo, SourceInfo, 
-    ConversationMessage, Session, CompressMode, SearchMode, CompressModeInfo,
+    ConversationMessage, CompressMode, SearchMode, CompressModeInfo,
 };
 use langchainrust::{
     language_models::OpenAIChat,
