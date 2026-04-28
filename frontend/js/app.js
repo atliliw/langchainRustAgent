@@ -117,6 +117,7 @@ async function compareSearch() {
 
 function renderResults(results) {
     if (results.length === 0) return '<p style="color: #64748b;">无结果</p>';
+    window._searchResults = results;
     return results.map((r, idx) => {
         const source = r.source || 'unknown';
         const isBM25 = source === 'bm25';
@@ -127,8 +128,6 @@ function renderResults(results) {
         const isMerged = r.metadata?.is_merged || false;
         const fullContent = r.content || '';
         const shortContent = fullContent.length > 150 ? fullContent.substring(0, 150) + '...' : fullContent;
-        
-        const detailData = encodeURIComponent(JSON.stringify(r));
         
         return `<div class="result-item" style="padding:20px;margin-bottom:16px;background:white;border-radius:10px;border:1px solid #cbd5e1;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
@@ -152,23 +151,24 @@ function renderResults(results) {
             <div style="color:#1e293b;line-height:1.8;font-size:15px;white-space:pre-wrap;word-break:break-word;margin-bottom:16px;padding:12px;background:#f8fafc;border-radius:8px;">${escapeHtml(shortContent)}</div>
             
             <div style="display:flex;gap:10px;">
-                <button onclick="openDetailModal('${detailData}')" style="padding:10px 20px;background:#1e40af;color:white;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:500;">📄 查看完整详情</button>
+                <button onclick="openDetailModal(${idx})" style="padding:10px 20px;background:#1e40af;color:white;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:500;">📄 查看完整详情</button>
             </div>
         </div>`;
     }).join('');
 }
 
 function copyToClipboard(text) {
-    const decodedText = text.includes('%') ? decodeURIComponent(text) : text;
-    navigator.clipboard.writeText(decodedText).then(() => {
+    navigator.clipboard.writeText(text).then(() => {
         alert('已复制到剪贴板');
     }).catch(err => {
         console.error('复制失败:', err);
     });
 }
 
-function openDetailModal(dataEncoded) {
-    const r = JSON.parse(decodeURIComponent(dataEncoded));
+function openDetailModal(idx) {
+    const r = window._searchResults[idx];
+    if (!r) return;
+    
     const source = r.source || 'unknown';
     const isBM25 = source === 'bm25';
     const scoreDisplay = isBM25 ? r.score.toFixed(4) : (r.score * 100).toFixed(2) + '%';
@@ -217,9 +217,9 @@ function openDetailModal(dataEncoded) {
             <div style="background:#f1f5f9;padding:16px;border-radius:10px;border:1px solid #cbd5e1;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
                     <span style="font-size:13px;color:#1e40af;font-weight:600;">完整内容 (${fullContent.length} 字符)</span>
-                    <button onclick="copyToClipboard('${encodeURIComponent(fullContent)}')" style="padding:6px 12px;background:#059669;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer;">复制内容</button>
+                    <button onclick="copyText()" style="padding:6px 12px;background:#059669;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer;">复制内容</button>
                 </div>
-                <div style="font-size:15px;color:#1e293b;line-height:1.8;white-space:pre-wrap;word-break:break-word;background:white;padding:14px;border-radius:8px;max-height:500px;overflow-y:auto;">${escapeHtml(fullContent)}</div>
+                <div id="detail-full-content" style="font-size:15px;color:#1e293b;line-height:1.8;white-space:pre-wrap;word-break:break-word;background:white;padding:14px;border-radius:8px;max-height:500px;overflow-y:auto;">${escapeHtml(fullContent)}</div>
             </div>
             
             ${Object.keys(metadata).length > 0 ? `<div style="background:#f1f5f9;padding:16px;border-radius:10px;border:1px solid #cbd5e1;">
@@ -229,7 +229,12 @@ function openDetailModal(dataEncoded) {
         </div>
     `;
     
+    window._currentContent = fullContent;
     modal.style.display = 'block';
+}
+
+function copyText() {
+    copyToClipboard(window._currentContent);
 }
 
 function closeDetailModal() {
@@ -239,7 +244,6 @@ function closeDetailModal() {
 document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') closeDetailModal();
 });
-}
 
 async function clearAll() {
     if (!confirm('确定要清空所有数据吗？包括文档、索引和对话历史？')) return;
