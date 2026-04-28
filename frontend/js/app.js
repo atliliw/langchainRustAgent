@@ -39,15 +39,22 @@ async function loadDocuments() {
         const res = await fetch(`${API_BASE}/documents`);
         const documents = await res.json();
         if (documents.length === 0) { listEl.innerHTML = '<p style="color: #666;">暂无文档，请先上传</p>'; return; }
-        let html = '<table style="width: 100%; border-collapse: collapse;"><thead><tr style="background: #f1f5f9;">';
+        let html = '<div style="margin-bottom:15px;display:flex;gap:10px;">';
+        html += `<button class="btn btn-small btn-danger" onclick="batchDeleteDocuments()">🗑️ 批量删除</button>`;
+        html += `<button class="btn btn-small" onclick="importSession()">📥 导入会话</button>`;
+        html += '</div>';
+        html += '<table style="width: 100%; border-collapse: collapse;"><thead><tr style="background: #f1f5f9;">';
+        html += '<th style="padding: 12px; border: 1px solid #e2e8f0;width:40px;"><input type="checkbox" onchange="toggleAllDocs(this)"></th>';
         html += '<th style="padding: 12px; border: 1px solid #e2e8f0;">文档标题</th><th style="padding: 12px; border: 1px solid #e2e8f0;">Chunk数量</th><th style="padding: 12px; border: 1px solid #e2e8f0;">内容预览</th><th style="padding: 12px; border: 1px solid #e2e8f0;">操作</th></tr></thead><tbody>';
         documents.forEach(doc => {
             html += `<tr>
+                <td style="padding: 12px; border: 1px solid #e2e8f0;text-align:center;"><input type="checkbox" class="doc-checkbox" value="${doc.id}"></td>
                 <td style="padding: 12px; border: 1px solid #e2e8f0;">${escapeHtml(doc.title)}</td>
                 <td style="padding: 12px; border: 1px solid #e2e8f0; text-align: center;">${doc.chunk_count}</td>
                 <td style="padding: 12px; border: 1px solid #e2e8f0; color: #64748b; font-size: 13px;">${escapeHtml(doc.content_preview)}...</td>
                 <td style="padding: 12px; border: 1px solid #e2e8f0;">
                     <button class="btn btn-small" onclick="previewDocument('${doc.id}', '${escapeHtml(doc.title)}')">预览</button>
+                    <button class="btn btn-small" onclick="addDocumentTags('${doc.id}')">🏷️</button>
                     <button class="btn btn-small btn-danger" onclick="deleteDocument('${doc.id}', '${escapeHtml(doc.title)}')">删除</button>
                 </td>
             </tr>`;
@@ -55,6 +62,10 @@ async function loadDocuments() {
         html += '</tbody></table>';
         listEl.innerHTML = html;
     } catch (e) { listEl.innerHTML = `<div class="error">加载失败: ${e.message}</div>`; }
+}
+
+function toggleAllDocs(cb) {
+    document.querySelectorAll('.doc-checkbox').forEach(c => c.checked = cb.checked);
 }
 
 async function previewDocument(parentId, title) {
@@ -408,7 +419,10 @@ async function loadSessions() {
     try {
         const res = await fetch(`${API_BASE}/chat/sessions`);
         const sessions = await res.json();
-        let html = '';
+        let html = '<div style="margin-bottom:10px;">';
+        html += '<input type="text" id="session-search" placeholder="搜索会话..." style="width:100%;padding:8px;border:1px solid #e2e8f0;border-radius:6px;" onkeypress="if(event.key===\'Enter\')searchSessions(this.value)">';
+        html += `<button class="btn btn-small" onclick="importSession()" style="margin-top:8px;">📥 导入</button>`;
+        html += '</div>';
         sessions.forEach(s => {
             const isActive = s.session_id === currentSessionId;
             const title = s.title || s.preview || '新对话';
@@ -437,7 +451,9 @@ async function loadSession(sessionId) {
     try {
         const res = await fetch(`${API_BASE}/chat/history/${sessionId}`);
         const messages = await res.json();
-        let html = '';
+        let html = '<div style="margin-bottom:10px;display:flex;gap:10px;">';
+        html += `<button class="btn btn-small" onclick="exportSession('${sessionId}')">📤 导出会话</button>`;
+        html += '</div>';
         messages.forEach(m => {
             const roleClass = m.role === 'user' ? 'user' : 'assistant';
             const msgId = m.id;
@@ -446,6 +462,7 @@ async function loadSession(sessionId) {
                 <div class="message-actions">
                     <button class="msg-btn copy-btn" onclick="copyMessage('${msgId}')">📋</button>
                     <button class="msg-btn edit-btn" onclick="editMessageUI('${msgId}')">✏️</button>
+                    ${m.role === 'assistant' ? `<button class="msg-btn regen-btn" onclick="regenerateMessage('${msgId}')">🔄</button>` : ''}
                     <button class="msg-btn delete-btn" onclick="deleteMessageUI('${msgId}')">🗑️</button>
                 </div>
                 <div class="time">${formatTime(m.time_created)}</div>
@@ -618,10 +635,40 @@ async function loadMonitorStats() {
             </div>`;
         });
         document.getElementById('monitor-api-types').innerHTML = typesHtml || '<div style="color:#64748b;">暂无数据</div>';
+        
+        renderMonitorChart(stats);
     } catch (e) {
         console.error('加载监控数据失败:', e);
         showToast('加载监控数据失败');
     }
+}
+
+function renderMonitorChart(stats) {
+    const canvas = document.getElementById('monitor-chart');
+    if (!canvas) return;
+    
+    if (window._monitorChart) window._monitorChart.destroy();
+    
+    const ctx = canvas.getContext('2d');
+    window._monitorChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: stats.api_types.map(t => t.api_type),
+            datasets: [{
+                label: '调用次数',
+                data: stats.api_types.map(t => t.call_count),
+                backgroundColor: '#3b82f6'
+            }, {
+                label: 'Token消耗',
+                data: stats.api_types.map(t => t.tokens_used),
+                backgroundColor: '#10b981'
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: { legend: { position: 'top' } }
+        }
+    });
 }
 
 function handleKeyPress(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }
@@ -720,6 +767,138 @@ async function runStreamDemo() {
         const data = await res.json();
         document.getElementById('langgraph-results').innerHTML = `<h3 style="color: #4caf50;">流式执行事件</h3><div style="background: rgba(255,255,255,0.05); padding: 15px; border-radius: 8px;"><p><strong>事件数量：</strong>${data.length}</p><table style="width: 100%; margin-top: 15px;"><thead><tr style="background: rgba(255,255,255,0.1);"><th style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">节点</th><th style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">事件类型</th><th style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">时间(ms)</th></tr></thead><tbody>${data.map(e => `<tr><td style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(e.node_name)}</td><td style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(e.event_type)}</td><td style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">${e.timestamp_ms}</td></tr>`).join('')}</tbody></table></div>`;
     } catch (e) { showResult('langgraph-results', 'error', `执行失败: ${e.message}`); }
+}
+
+async function regenerateMessage(msgId) {
+    if (!confirm('确定重新生成这条AI回复？')) return;
+    try {
+        showToast('正在重新生成...');
+        const res = await fetch(`${API_BASE}/chat/message/${msgId}/regenerate`, {method: 'POST'});
+        const data = await res.json();
+        if (data.message_id) {
+            const msgEl = document.querySelector(`.message[data-msg-id="${msgId}"]`);
+            if (msgEl) {
+                msgEl.querySelector('.message-content').textContent = data.reply;
+                msgEl.dataset.msgId = data.message_id;
+            }
+            showToast('已重新生成');
+            loadSessions();
+        } else {
+            showToast('重新生成失败');
+        }
+    } catch (e) { showToast('重新生成失败: ' + e.message); }
+}
+
+async function exportSession(sessionId) {
+    try {
+        const res = await fetch(`${API_BASE}/chat/session/${sessionId}/export`);
+        const data = await res.json();
+        const json = JSON.stringify(data, null, 2);
+        const blob = new Blob([json], {type: 'application/json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `session_${sessionId}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        showToast('会话已导出');
+    } catch (e) { showToast('导出失败: ' + e.message); }
+}
+
+async function importSession() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.onchange = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        try {
+            const text = await file.text();
+            const data = JSON.parse(text);
+            const res = await fetch(`${API_BASE}/chat/session/import`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            });
+            const result = await res.json();
+            if (result.success) {
+                showToast('会话导入成功');
+                loadSessions(); loadAllSessions();
+            } else {
+                showToast('导入失败');
+            }
+        } catch (e) { showToast('导入失败: ' + e.message); }
+    };
+    input.click();
+}
+
+async function searchSessions(query) {
+    if (!query) return;
+    try {
+        const res = await fetch(`${API_BASE}/chat/sessions/search`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({query})
+        });
+        const sessions = await res.json();
+        let html = '<div style="display: grid; gap: 10px;">';
+        sessions.forEach(s => {
+            html += `<div class="session-item" onclick="loadSession('${s.session_id}'); showTab('chat');">
+                <div style="font-weight:500;">${escapeHtml(s.title)}</div>
+                <div class="time">${formatTime(s.created_at)} | ${s.message_count}条</div>
+            </div>`;
+        });
+        html += '</div>';
+        document.getElementById('sessions-list').innerHTML = html || '<div style="color:#64748b;">无匹配会话</div>';
+    } catch (e) { showToast('搜索失败: ' + e.message); }
+}
+
+async function batchDeleteDocuments() {
+    const checkboxes = document.querySelectorAll('.doc-checkbox:checked');
+    const ids = Array.from(checkboxes).map(cb => cb.value);
+    if (ids.length === 0) { showToast('请选择要删除的文档'); return; }
+    if (!confirm(`确定删除 ${ids.length} 个文档？`)) return;
+    try {
+        const res = await fetch(`${API_BASE}/documents/batch-delete`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({parent_ids: ids})
+        });
+        const data = await res.json();
+        showToast(data.message);
+        loadDocuments(); fetchStats();
+    } catch (e) { showToast('删除失败: ' + e.message); }
+}
+
+async function addDocumentTags(parentId) {
+    const tags = prompt('输入标签（逗号分隔）:');
+    if (!tags) return;
+    const tagList = tags.split(',').map(t => t.trim()).filter(t => t);
+    try {
+        await fetch(`${API_BASE}/documents/tags`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({parent_id: parentId, tags: tagList})
+        });
+        showToast('标签已添加');
+        loadDocuments();
+    } catch (e) { showToast('添加标签失败: ' + e.message); }
+}
+
+async function loadDocumentsByTag(tag) {
+    try {
+        const res = await fetch(`${API_BASE}/documents/tag/${encodeURIComponent(tag)}`);
+        const documents = await res.json();
+        let html = `<h3 style="color:#1e40af;margin-bottom:15px;">标签: ${escapeHtml(tag)} (${documents.length}个文档)</h3>`;
+        html += '<table style="width:100%;border-collapse:collapse;"><tbody>';
+        documents.forEach(doc => {
+            html += `<tr><td style="padding:12px;border:1px solid #e2e8f0;">${escapeHtml(doc.title)}</td>
+                <td style="padding:12px;border:1px solid #e2e8f0;text-align:center;">${doc.chunk_count}</td>
+                <td style="padding:12px;border:1px solid #e2e8f0;"><button class="btn btn-small" onclick="previewDocument('${doc.id}')">预览</button></td></tr>`;
+        });
+        html += '</tbody></table>';
+        document.getElementById('documents-list').innerHTML = html || '<div style="color:#64748b;">无文档</div>';
+    } catch (e) { showToast('加载失败: ' + e.message); }
 }
 
 document.addEventListener('DOMContentLoaded', function() {

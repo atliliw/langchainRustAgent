@@ -118,3 +118,34 @@ pub struct CompressModeInfo {
 pub struct EditMessageRequest {
     pub content: String,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegenerateResponse {
+    pub message_id: String,
+    pub reply: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionExport {
+    pub session_id: String,
+    pub title: String,
+    pub created_at: String,
+    pub messages: Vec<ConversationMessage>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionImport {
+    pub title: Option<String>,
+    pub messages: Vec<ImportMessage>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ImportMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionSearchRequest {
+    pub query: String,
+}

@@ -32,3 +32,28 @@ pub struct DocumentInfo {
     pub chunk_count: usize,
     pub metadata: HashMap<String, String>,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BatchDeleteRequest {
+    pub parent_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BatchDeleteResponse {
+    pub success: bool,
+    pub deleted_count: usize,
+    pub failed_count: usize,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DocumentTagRequest {
+    pub parent_id: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DocumentTagInfo {
+    pub parent_id: String,
+    pub tags: Vec<String>,
+}

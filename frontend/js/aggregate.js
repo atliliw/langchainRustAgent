@@ -60,13 +60,26 @@ async function collectAll() {
     
     btn.disabled = true;
     btn.textContent = '⏳ 采集中...';
-    status.textContent = '正在采集GitHub、Hacker News、RSS、ArXiv...';
+    status.textContent = '正在采集GitHub、Hacker News、RSS、ArXiv...（可能需要几分钟）';
+    status.style.color = '#1e40af';
     
     try {
-        const result = await AggregateAPI.collect();
+        const response = await fetch('/api/aggregate/collect', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sources: null, force: false }),
+            timeout: 300000
+        });
+        
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || '采集失败');
+        }
+        
+        const result = await response.json();
         
         status.textContent = `采集完成！共获取 ${result.collected_count} 条内容`;
-        status.style.color = '#28a745';
+        status.style.color = '#059669';
         
         result.records.forEach(record => {
             console.log(`${record.source}: ${record.count} 条, 状态: ${record.status}`);
@@ -77,7 +90,8 @@ async function collectAll() {
         
     } catch (error) {
         status.textContent = `采集失败: ${error.message}`;
-        status.style.color = '#dc3545';
+        status.style.color = '#dc2626';
+        console.error('采集错误:', error);
     }
     
     btn.disabled = false;

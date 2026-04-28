@@ -304,7 +304,7 @@ impl ConversationStore {
         let mut total_tokens = 0;
         
         for msg in remaining.into_iter().rev() {
-            let msg_tokens = Self::estimate_tokens(&msg.content);
+            let msg_tokens = estimate_tokens(&msg.content);
             if total_tokens + msg_tokens <= max_tokens {
                 recent.insert(0, msg);
                 total_tokens += msg_tokens;
@@ -339,7 +339,7 @@ impl ConversationStore {
         let recent = history.into_iter().skip(to_compress_count).collect::<Vec<_>>();
         
         let summary = self.generate_summary(&to_compress).await?;
-        let summary_tokens = Self::estimate_tokens(&summary);
+        let summary_tokens = estimate_tokens(&summary);
         
         let summary_msg = ConversationMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -390,7 +390,7 @@ impl ConversationStore {
         } else {
             to_compress.iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("\n")
         };
-        let summary_tokens = Self::estimate_tokens(&summary) as i64;
+        let summary_tokens = estimate_tokens(&summary) as i64;
         
         let summary_msg = ConversationMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -431,12 +431,6 @@ impl ConversationStore {
             .content;
         
         Ok(summary)
-    }
-    
-    fn estimate_tokens(text: &str) -> usize {
-        let char_count = text.chars().count();
-        let chinese_chars = text.chars().filter(|c| *c > '\u{4E00}' && *c < '\u{9FFF}').count();
-        (chinese_chars * 2 + (char_count - chinese_chars)) / 4 + 1
     }
     
     async fn session_exists(&self, session_id: &str) -> Result<bool, ConversationError> {
@@ -485,7 +479,7 @@ impl ConversationStore {
     async fn save_message(&self, session_id: &str, role: &str, content: &str) -> Result<(), ConversationError> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
-        let tokens = Self::estimate_tokens(content) as i64;
+        let tokens = estimate_tokens(content) as i64;
         
         let count_row = sqlx::query("SELECT COUNT(*) FROM message WHERE session_id = ?")
             .bind(session_id)
@@ -509,7 +503,7 @@ impl ConversationStore {
     }
     
     pub async fn edit_message(&self, message_id: &str, content: &str) -> Result<(), ConversationError> {
-        let tokens = Self::estimate_tokens(content) as i64;
+        let tokens = estimate_tokens(content) as i64;
         
         sqlx::query("UPDATE message SET content = ?, tokens = ? WHERE id = ?")
             .bind(content).bind(tokens).bind(message_id)
@@ -716,4 +710,116 @@ pub struct ApiTypeStats {
     pub call_count: i64,
     pub tokens_used: i64,
     pub avg_duration_ms: i64,
+}
+
+pub fn estimate_tokens(text: &str) -> usize {
+    let char_count = text.chars().count();
+    let chinese_chars = text.chars().filter(|c| *c > '\u{4E00}' && *c < '\u{9FFF}').count();
+    (chinese_chars * 2 + (char_count - chinese_chars)) / 4 + 1
+}
+
+impl ConversationStore {
+    pub async fn regenerate_message(&self, message_id: &str) -> Result<(String, String, String), ConversationError> {
+        let row = sqlx::query("SELECT session_id, role FROM message WHERE id = ?")
+            .bind(message_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        
+        let session_id: String = row.get(0);
+        let role: String = row.get(1);
+        
+        if role != "assistant" {
+            return Err(ConversationError::InvalidOperation("只能重新生成AI回复".to_string()));
+        }
+        
+        self.delete_message(message_id).await?;
+        
+        let history = self.get_history(&session_id).await?;
+        let last_user_msg = history.iter().rev().find(|m| m.role == "user");
+        
+        if let Some(user_msg) = last_user_msg {
+            let messages = vec![
+                Message::system("请用中文回答用户问题。"),
+                Message::human(&user_msg.content),
+            ];
+            
+            let reply = self.llm.invoke(messages, None).await
+                .map_err(|e| ConversationError::LLMError(e.to_string()))?
+                .content;
+            
+            let new_id = uuid::Uuid::new_v4().to_string();
+            self.save_message(&session_id, "assistant", &reply).await?;
+            
+            Ok((session_id, new_id, reply))
+        } else {
+            Err(ConversationError::InvalidOperation("没有找到用户消息".to_string()))
+        }
+    }
+    
+    pub async fn get_session_info(&self, session_id: &str) -> Result<SessionInfo, ConversationError> {
+        let row = sqlx::query("SELECT id, title, time_created, message_count FROM session WHERE id = ?")
+            .bind(session_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        
+        let time_created = row.get::<i64, _>(2);
+        let created_at = chrono::DateTime::from_timestamp_millis(time_created)
+            .map(|dt| dt.to_rfc3339()).unwrap_or_default();
+        
+        Ok(SessionInfo {
+            session_id: row.get::<String, _>(0),
+            title: row.get::<String, _>(1),
+            created_at,
+            message_count: row.get::<i64, _>(3) as usize,
+            preview: String::new(),
+        })
+    }
+    
+    pub async fn import_session(&self, import: crate::models::SessionImport) -> Result<String, ConversationError> {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let title = import.title.unwrap_or_else(|| "导入会话".to_string());
+        self.create_session(&session_id, &title).await?;
+        
+        for msg in import.messages {
+            self.save_message(&session_id, &msg.role, &msg.content).await?;
+        }
+        
+        self.update_session_stats(&session_id).await?;
+        Ok(session_id)
+    }
+    
+    pub async fn search_sessions(&self, query: &str) -> Result<Vec<SessionInfo>, ConversationError> {
+        let rows = sqlx::query(
+            "SELECT s.id, s.title, s.time_created, s.message_count 
+             FROM session s 
+             JOIN message m ON s.id = m.session_id 
+             WHERE m.content LIKE ? OR s.title LIKE ?
+             GROUP BY s.id 
+             ORDER BY s.time_updated DESC 
+             LIMIT 20"
+        )
+        .bind(format!("%{}%", query))
+        .bind(format!("%{}%", query))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        
+        let sessions = rows.into_iter().map(|row| {
+            let time_created = row.get::<i64, _>(2);
+            let created_at = chrono::DateTime::from_timestamp_millis(time_created)
+                .map(|dt| dt.to_rfc3339()).unwrap_or_default();
+            
+            SessionInfo {
+                session_id: row.get::<String, _>(0),
+                title: row.get::<String, _>(1),
+                created_at,
+                message_count: row.get::<i64, _>(3) as usize,
+                preview: String::new(),
+            }
+        }).collect();
+        
+        Ok(sessions)
+    }
 }

@@ -6,9 +6,11 @@ pub mod content_store;
 
 pub use qdrant::QdrantStore;
 pub use bm25::BM25Store;
+pub use bm25::DocumentFileInfo;
 pub use hybrid::HybridStore;
 pub use hybrid::HybridSearchResult;
 pub use conversation::ConversationStore;
 pub use conversation::ApiStatsSummary;
 pub use conversation::ApiTypeStats;
+pub use conversation::estimate_tokens;
 pub use content_store::ContentStore;

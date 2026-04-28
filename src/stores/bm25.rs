@@ -187,4 +187,112 @@ impl BM25Store {
         
         Ok(())
     }
+    
+    pub async fn get_document_info(&self, parent_id: &str) -> Result<Option<DocumentFileInfo>, BM25Error> {
+        use mongodb::bson::doc;
+        
+        let db = self.mongo_client.database(&self.database_name);
+        let parent_collection = db.collection::<mongodb::bson::Document>(&self.parent_collection_name);
+        
+        let doc = parent_collection
+            .find_one(doc! { "_id": parent_id }, None)
+            .await
+            .map_err(|e| BM25Error::OperationError(e.to_string()))?;
+        
+        if let Some(d) = doc {
+            let metadata = d.get_document("metadata")
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.to_string(), s.to_string())))
+                        .collect::<std::collections::HashMap<String, String>>()
+                })
+                .unwrap_or_default();
+            
+            let filename = metadata.get("original_filename").cloned().unwrap_or_default();
+            
+            Ok(Some(DocumentFileInfo {
+                parent_id: parent_id.to_string(),
+                filename,
+                metadata,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    pub async fn add_document_tags(&self, parent_id: &str, tags: &[String]) -> Result<(), BM25Error> {
+        use mongodb::bson::doc;
+        
+        let db = self.mongo_client.database(&self.database_name);
+        let parent_collection = db.collection::<mongodb::bson::Document>(&self.parent_collection_name);
+        
+        let tags_doc: Vec<mongodb::bson::Bson> = tags.iter().map(|t| mongodb::bson::Bson::String(t.clone())).collect();
+        
+        parent_collection
+            .update_one(
+                doc! { "_id": parent_id },
+                doc! { "$set": { "metadata.tags": tags_doc } },
+                None
+            )
+            .await
+            .map_err(|e| BM25Error::OperationError(e.to_string()))?;
+        
+        Ok(())
+    }
+    
+    pub async fn get_documents_by_tag(&self, tag: &str) -> Result<Vec<DocumentInfo>, BM25Error> {
+        use mongodb::bson::doc;
+        
+        let db = self.mongo_client.database(&self.database_name);
+        let parent_collection = db.collection::<mongodb::bson::Document>(&self.parent_collection_name);
+        let chunk_collection = db.collection::<mongodb::bson::Document>(&self.chunk_collection_name);
+        
+        let mut cursor = parent_collection
+            .find(doc! { "metadata.tags": tag }, None)
+            .await
+            .map_err(|e| BM25Error::OperationError(e.to_string()))?;
+        
+        let mut documents = Vec::new();
+        
+        while cursor.advance().await.map_err(|e| BM25Error::OperationError(e.to_string()))? {
+            let doc = cursor.deserialize_current()
+                .map_err(|e| BM25Error::OperationError(e.to_string()))?;
+            
+            let id = doc.get_str("_id").unwrap_or("unknown").to_string();
+            let content = doc.get_str("content").unwrap_or("");
+            let metadata: std::collections::HashMap<String, String> = doc.get_document("metadata")
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.to_string(), s.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            
+            let chunk_count = chunk_collection
+                .count_documents(doc! { "parent_id": &id }, None)
+                .await
+                .map_err(|e| BM25Error::OperationError(e.to_string()))? as usize;
+            
+            let title = metadata.get("original_filename")
+                .cloned()
+                .unwrap_or_else(|| content.chars().take(50).collect());
+            
+            documents.push(DocumentInfo {
+                id,
+                title,
+                content_preview: content.chars().take(100).collect(),
+                chunk_count,
+                metadata,
+            });
+        }
+        
+        Ok(documents)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DocumentFileInfo {
+    pub parent_id: String,
+    pub filename: String,
+    pub metadata: std::collections::HashMap<String, String>,
 }

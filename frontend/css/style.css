@@ -195,6 +195,11 @@ pre { background: #f1f5f9; padding: 16px; border-radius: 8px; font-size: 12px; }
 .msg-btn { padding: 4px 8px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; background: rgba(0,0,0,0.1); }
 .msg-btn:hover { background: rgba(0,0,0,0.2); }
 .delete-btn:hover { background: #fecaca; }
+.regen-btn:hover { background: #bfdbfe; }
+
+.doc-checkbox { cursor: pointer; }
+
+#session-search { margin-bottom: 10px; }
 
 .toast {
     position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);

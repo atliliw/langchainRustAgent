@@ -23,3 +23,30 @@ pub async fn delete_document(
     let result = state.api.delete_document(&parent_id, &request.filename).await?;
     Ok(Json(result))
 }
+
+pub async fn batch_delete_documents(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<BatchDeleteRequest>,
+) -> Result<Json<BatchDeleteResponse>, ApiErrorResponse> {
+    let result = state.api.batch_delete_documents(request.parent_ids).await?;
+    Ok(Json(result))
+}
+
+pub async fn add_document_tags(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<DocumentTagRequest>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    state.api.add_document_tags(&request.parent_id, &request.tags).await?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "标签已添加"
+    })))
+}
+
+pub async fn get_documents_by_tag(
+    State(state): State<Arc<AppState>>,
+    Path(tag): Path<String>,
+) -> Result<Json<Vec<DocumentInfo>>, ApiErrorResponse> {
+    let documents = state.api.get_documents_by_tag(&tag).await?;
+    Ok(Json(documents))
+}

@@ -10,13 +10,27 @@ use axum::{
 };
 use futures_util::StreamExt;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub async fn chat(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, ApiErrorResponse> {
-    let response = state.api.chat(request).await?;
-    Ok(Json(response))
+    let start = Instant::now();
+    let result = state.api.chat(request).await;
+    
+    match result {
+        Ok(response) => {
+            let duration = start.elapsed().as_millis() as i64;
+            let tokens = crate::stores::estimate_tokens(&response.reply) as i64;
+            state.api.record_api_call("chat", tokens, duration, true).await.ok();
+            Ok(Json(response))
+        },
+        Err(e) => {
+            state.api.record_api_call("chat", 0, start.elapsed().as_millis() as i64, false).await.ok();
+            Err(ApiErrorResponse(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        }
+    }
 }
 
 pub async fn chat_stream(
@@ -25,6 +39,7 @@ pub async fn chat_stream(
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiErrorResponse> {
     use crate::models::SearchMode;
     
+    let start = Instant::now();
     let search_mode = SearchMode::from_flags(request.use_vector, request.use_bm25);
     
     let rag_sources = match search_mode {
@@ -61,16 +76,17 @@ pub async fn chat_stream(
     let (session_id, mut token_stream) = state.api.conversation_store.chat_stream(request.clone(), rag_sources).await
         .map_err(|e| ApiErrorResponse(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     
-    eprintln!("=== main.rs: session_id from chat_stream='{}' ===", session_id);
     let session_id_clean = session_id.trim().to_string();
-    eprintln!("=== main.rs: session_id_clean='{}' ===", session_id_clean);
     
     let user_msg = request.message.clone();
     let store = state.api.conversation_store.clone();
+    let api = state.api.clone();
+    let start_time = start;
     
     let stream = async_stream::stream! {
         let mut full_reply = String::new();
         let sid = session_id_clean.clone();
+        let mut success = true;
         
         yield Ok(Event::default().event("session").data(&sid));
         
@@ -88,6 +104,7 @@ pub async fn chat_stream(
                     yield Ok(Event::default().event("token").data(&token));
                 }
                 Err(e) => {
+                    success = false;
                     yield Ok(Event::default().event("error").data(e.to_string()));
                     break;
                 }
@@ -96,10 +113,14 @@ pub async fn chat_stream(
         
         store.save_full_message(&sid, &user_msg, &full_reply).await.ok();
         
+        let duration = start_time.elapsed().as_millis() as i64;
+        let tokens = crate::stores::estimate_tokens(&full_reply) as i64;
+        api.record_api_call("chat_stream", tokens, duration, success).await.ok();
+        
         yield Ok(Event::default().event("done").data("[DONE]"));
     };
     
-    Ok(Sse::new(stream))
+Ok(Sse::new(stream))
 }
 
 pub async fn get_chat_history(
@@ -153,4 +174,53 @@ pub async fn delete_message(
         "success": true,
         "message": "消息已删除"
     })))
+}
+
+pub async fn regenerate_message(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<String>,
+) -> Result<Json<RegenerateResponse>, ApiErrorResponse> {
+    let start = Instant::now();
+    let result = state.api.regenerate_message(&message_id).await;
+    
+    match result {
+        Ok(response) => {
+            let duration = start.elapsed().as_millis() as i64;
+            let tokens = crate::stores::estimate_tokens(&response.reply) as i64;
+            state.api.record_api_call("regenerate", tokens, duration, true).await.ok();
+            Ok(Json(response))
+        },
+        Err(e) => {
+            state.api.record_api_call("regenerate", 0, start.elapsed().as_millis() as i64, false).await.ok();
+            Err(ApiErrorResponse(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        }
+    }
+}
+
+pub async fn export_session(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<SessionExport>, ApiErrorResponse> {
+    let export = state.api.export_session(&session_id).await?;
+    Ok(Json(export))
+}
+
+pub async fn import_session(
+    State(state): State<Arc<AppState>>,
+    Json(import): Json<SessionImport>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    let session_id = state.api.import_session(import).await?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "session_id": session_id,
+        "message": "会话导入成功"
+    })))
+}
+
+pub async fn search_sessions(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SessionSearchRequest>,
+) -> Result<Json<Vec<SessionInfo>>, ApiErrorResponse> {
+    let sessions = state.api.search_sessions(&request.query).await?;
+    Ok(Json(sessions))
 }

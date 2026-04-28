@@ -17,21 +17,38 @@ port = 8080
 upload_dir = "uploads"
 
 # ============================================================================
-# OpenAI / LLM API 配置
+# LLM API 配置（支持 OpenAI / 火山引擎）
 # ============================================================================
+# 
+# 方式一：OpenAI
+# [openai]
+# api_key = "your-openai-api-key"
+# base_url = "https://api.openai.com/v1"
+# chat_model = "gpt-3.5-turbo"
+# embedding_model = "text-embedding-3-small"
+#
+# 方式二：火山引擎（推荐）
 [openai]
-api_key = "your-openai-api-key-here"
-base_url = "https://api.openai.com/v1"
-chat_model = "gpt-3.5-turbo"
-embedding_model = "text-embedding-ada-002"
+api_key = "your-volcengine-api-key"
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+chat_model = "your-endpoint-id"  # 火山引擎使用 endpoint_id
+embedding_model = "your-endpoint-id"
 
 # ============================================================================
-# Embedding 配置
+# Embedding 配置（独立配置，可使用不同 API）
 # ============================================================================
+# 
+# 方式一：OpenAI Embedding
+# [embedding]
+# api_key = "your-openai-api-key"
+# base_url = "https://api.openai.com/v1"
+# model = "text-embedding-3-small"
+#
+# 方式二：火山引擎 Embedding
 [embedding]
-api_key = "your-openai-api-key-here"
-base_url = "https://api.openai.com/v1"
-model = "text-embedding-ada-002"
+api_key = "your-volcengine-api-key"
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+model = "your-embedding-endpoint-id"
 
 # ============================================================================
 # MongoDB BM25 文档存储配置

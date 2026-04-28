@@ -7,4 +7,7 @@ pub enum ConversationError {
 
     #[error("LLM 调用失败: {0}")]
     LLMError(String),
+
+    #[error("无效操作: {0}")]
+    InvalidOperation(String),
 }

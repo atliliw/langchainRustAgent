@@ -55,6 +55,22 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             axum::routing::delete(chat::delete_message),
         )
         .route(
+            "/api/chat/message/:message_id/regenerate",
+            axum::routing::post(chat::regenerate_message),
+        )
+        .route(
+            "/api/chat/session/:session_id/export",
+            axum::routing::get(chat::export_session),
+        )
+        .route(
+            "/api/chat/session/import",
+            axum::routing::post(chat::import_session),
+        )
+        .route(
+            "/api/chat/sessions/search",
+            axum::routing::post(chat::search_sessions),
+        )
+        .route(
             "/api/chat/compress-modes",
             axum::routing::get(chat::get_compress_modes),
         )
@@ -77,6 +93,18 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/documents",
             axum::routing::get(document::list_documents),
+        )
+        .route(
+            "/api/documents/batch-delete",
+            axum::routing::post(document::batch_delete_documents),
+        )
+        .route(
+            "/api/documents/tags",
+            axum::routing::post(document::add_document_tags),
+        )
+        .route(
+            "/api/documents/tag/:tag",
+            axum::routing::get(document::get_documents_by_tag),
         )
         .route(
             "/api/documents/:parent_id",

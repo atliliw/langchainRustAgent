@@ -353,4 +353,67 @@ impl ApiService {
         self.conversation_store.record_api_call(api_type, tokens, duration_ms, success).await?;
         Ok(())
     }
+    
+    pub async fn regenerate_message(&self, message_id: &str) -> Result<RegenerateResponse, ApiError> {
+        let (session_id, new_message_id, reply) = self.conversation_store.regenerate_message(message_id).await?;
+        Ok(RegenerateResponse {
+            message_id: new_message_id,
+            reply,
+        })
+    }
+    
+    pub async fn export_session(&self, session_id: &str) -> Result<SessionExport, ApiError> {
+        let session = self.conversation_store.get_session_info(session_id).await?;
+        let messages = self.conversation_store.get_history(session_id).await?;
+        Ok(SessionExport {
+            session_id: session_id.to_string(),
+            title: session.title,
+            created_at: session.created_at,
+            messages,
+        })
+    }
+    
+    pub async fn import_session(&self, import: SessionImport) -> Result<String, ApiError> {
+        let session_id = self.conversation_store.import_session(import).await?;
+        Ok(session_id)
+    }
+    
+    pub async fn search_sessions(&self, query: &str) -> Result<Vec<SessionInfo>, ApiError> {
+        let sessions = self.conversation_store.search_sessions(query).await?;
+        Ok(sessions)
+    }
+    
+    pub async fn batch_delete_documents(&self, parent_ids: Vec<String>) -> Result<BatchDeleteResponse, ApiError> {
+        let mut deleted_count = 0;
+        let mut failed_count = 0;
+        
+        for parent_id in parent_ids {
+            let doc_info = self.bm25_store.get_document_info(&parent_id).await?;
+            if let Some(info) = doc_info {
+                let filename = info.filename.clone();
+                self.bm25_store.delete_document(&parent_id).await?;
+                self.vector_store.delete_by_metadata("original_filename", &filename).await?;
+                deleted_count += 1;
+            } else {
+                failed_count += 1;
+            }
+        }
+        
+        Ok(BatchDeleteResponse {
+            success: true,
+            deleted_count,
+            failed_count,
+            message: format!("成功删除 {} 个文档，失败 {} 个", deleted_count, failed_count),
+        })
+    }
+    
+    pub async fn add_document_tags(&self, parent_id: &str, tags: &[String]) -> Result<(), ApiError> {
+        self.bm25_store.add_document_tags(parent_id, tags).await?;
+        Ok(())
+    }
+    
+    pub async fn get_documents_by_tag(&self, tag: &str) -> Result<Vec<DocumentInfo>, ApiError> {
+        let documents = self.bm25_store.get_documents_by_tag(tag).await?;
+        Ok(documents)
+    }
 }
