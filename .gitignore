@@ -32,6 +32,7 @@ logs/
 # Temporary
 *.tmp
 *.bak
+*.tar
 
 # Deployment package (contains sensitive config and binaries)
 deploy_package/
