@@ -116,25 +116,129 @@ async function compareSearch() {
 }
 
 function renderResults(results) {
-    if (results.length === 0) return '<p style="color: #a2a2a2;">无结果</p>';
+    if (results.length === 0) return '<p style="color: #64748b;">无结果</p>';
     return results.map((r, idx) => {
         const source = r.source || 'unknown';
         const isBM25 = source === 'bm25';
         const scoreDisplay = isBM25 ? r.score.toFixed(2) : (r.score * 100).toFixed(1) + '%';
-        const idDisplay = r.id ? `<span style="font-size:11px;color:#64748b;">ID: ${r.id.substring(0, 12)}...</span>` : '';
-        const metaInfo = r.metadata && r.metadata.parent_id ? `<span style="font-size:11px;color:#64748b;">Parent: ${r.metadata.parent_id.substring(0, 12)}...</span>` : '';
-        const mergedInfo = r.metadata && r.metadata.is_merged ? '<span style="font-size:11px;color:#059669;">[merged]</span>' : '';
-        return `<div class="result-item" style="padding:16px;margin-bottom:12px;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                <span style="font-size:12px;color:#64748b;">#${idx + 1}</span>
-                <span class="score" style="font-weight:600;">${scoreDisplay}</span>
+        const scoreLabel = isBM25 ? 'BM25分数' : '相似度';
+        const fullId = r.id || 'unknown';
+        const parentId = r.metadata?.parent_id || '';
+        const isMerged = r.metadata?.is_merged || false;
+        const fullContent = r.content || '';
+        const shortContent = fullContent.length > 150 ? fullContent.substring(0, 150) + '...' : fullContent;
+        
+        const detailData = encodeURIComponent(JSON.stringify(r));
+        
+        return `<div class="result-item" style="padding:20px;margin-bottom:16px;background:white;border-radius:10px;border:1px solid #cbd5e1;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                <div style="display:flex;align-items:center;gap:12px;">
+                    <span style="background:#1e40af;color:white;padding:4px 10px;border-radius:6px;font-size:13px;font-weight:600;">#${idx + 1}</span>
+                    <span style="background:${isBM25 ? '#059669' : '#3b82f6'};color:white;padding:4px 10px;border-radius:6px;font-size:13px;font-weight:500;">${source}</span>
+                    ${isMerged ? '<span style="background:#f59e0b;color:white;padding:4px 10px;border-radius:6px;font-size:13px;">merged</span>' : ''}
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <span style="font-size:13px;color:#475569;">${scoreLabel}:</span>
+                    <span style="font-size:20px;font-weight:700;color:#059669;">${scoreDisplay}</span>
+                </div>
             </div>
-            <div style="display:flex;gap:12px;margin-bottom:8px;font-size:11px;color:#64748b;">
-                ${idDisplay} ${metaInfo} ${mergedInfo}
+            
+            <div style="background:#f1f5f9;padding:12px;border-radius:8px;margin-bottom:12px;display:flex;align-items:center;gap:8px;">
+                <span style="font-size:13px;color:#1e40af;font-weight:600;">ID:</span>
+                <span style="font-family:monospace;font-size:12px;color:#1e293b;word-break:break-all;flex:1;">${fullId}</span>
+                <button onclick="copyToClipboard('${fullId}')" style="padding:4px 10px;background:#3b82f6;color:white;border:none;border-radius:4px;font-size:12px;cursor:pointer;">复制</button>
             </div>
-            <div class="content" style="color:#1e293b;line-height:1.6;">${escapeHtml(r.content.substring(0, 200))}${r.content.length > 200 ? '...' : ''}</div>
+            
+            <div style="color:#1e293b;line-height:1.8;font-size:15px;white-space:pre-wrap;word-break:break-word;margin-bottom:16px;padding:12px;background:#f8fafc;border-radius:8px;">${escapeHtml(shortContent)}</div>
+            
+            <div style="display:flex;gap:10px;">
+                <button onclick="openDetailModal('${detailData}')" style="padding:10px 20px;background:#1e40af;color:white;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:500;">📄 查看完整详情</button>
+            </div>
         </div>`;
     }).join('');
+}
+
+function copyToClipboard(text) {
+    const decodedText = text.includes('%') ? decodeURIComponent(text) : text;
+    navigator.clipboard.writeText(decodedText).then(() => {
+        alert('已复制到剪贴板');
+    }).catch(err => {
+        console.error('复制失败:', err);
+    });
+}
+
+function openDetailModal(dataEncoded) {
+    const r = JSON.parse(decodeURIComponent(dataEncoded));
+    const source = r.source || 'unknown';
+    const isBM25 = source === 'bm25';
+    const scoreDisplay = isBM25 ? r.score.toFixed(4) : (r.score * 100).toFixed(2) + '%';
+    const fullId = r.id || 'unknown';
+    const parentId = r.metadata?.parent_id || '';
+    const isMerged = r.metadata?.is_merged || false;
+    const fullContent = r.content || '';
+    const metadata = r.metadata || {};
+    
+    const modal = document.getElementById('detail-modal');
+    const contentDiv = document.getElementById('detail-content');
+    
+    contentDiv.innerHTML = `
+        <div style="display:grid;gap:16px;">
+            <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px;">
+                <div style="background:#f1f5f9;padding:20px;border-radius:10px;border:1px solid #cbd5e1;">
+                    <div style="font-size:13px;color:#475569;margin-bottom:6px;">搜索来源</div>
+                    <div style="font-size:18px;font-weight:700;color:#1e40af;">${source}</div>
+                </div>
+                <div style="background:#f1f5f9;padding:20px;border-radius:10px;border:1px solid #cbd5e1;">
+                    <div style="font-size:13px;color:#475569;margin-bottom:6px;">${isBM25 ? 'BM25分数' : '相似度'}</div>
+                    <div style="font-size:18px;font-weight:700;color:#059669;">${scoreDisplay}</div>
+                </div>
+            </div>
+            
+            <div style="background:#f1f5f9;padding:16px;border-radius:10px;border:1px solid #cbd5e1;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                    <span style="font-size:13px;color:#1e40af;font-weight:600;">Chunk ID</span>
+                    <button onclick="copyToClipboard('${fullId}')" style="padding:6px 12px;background:#3b82f6;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer;">复制</button>
+                </div>
+                <div style="font-family:monospace;font-size:14px;color:#1e293b;word-break:break-all;background:white;padding:10px;border-radius:6px;line-height:1.5;">${fullId}</div>
+            </div>
+            
+            ${parentId ? `<div style="background:#f1f5f9;padding:16px;border-radius:10px;border:1px solid #cbd5e1;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                    <span style="font-size:13px;color:#1e40af;font-weight:600;">Parent ID (文档ID)</span>
+                    <button onclick="copyToClipboard('${parentId}')" style="padding:6px 12px;background:#3b82f6;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer;">复制</button>
+                </div>
+                <div style="font-family:monospace;font-size:14px;color:#1e293b;word-break:break-all;background:white;padding:10px;border-radius:6px;line-height:1.5;">${parentId}</div>
+            </div>` : ''}
+            
+            ${isMerged ? `<div style="background:#fef3c7;padding:16px;border-radius:10px;border:1px solid #fcd34d;">
+                <div style="font-size:15px;color:#b45309;font-weight:600;">⚠️ 此结果由多个chunk合并而成</div>
+            </div>` : ''}
+            
+            <div style="background:#f1f5f9;padding:16px;border-radius:10px;border:1px solid #cbd5e1;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                    <span style="font-size:13px;color:#1e40af;font-weight:600;">完整内容 (${fullContent.length} 字符)</span>
+                    <button onclick="copyToClipboard('${encodeURIComponent(fullContent)}')" style="padding:6px 12px;background:#059669;color:white;border:none;border-radius:6px;font-size:13px;cursor:pointer;">复制内容</button>
+                </div>
+                <div style="font-size:15px;color:#1e293b;line-height:1.8;white-space:pre-wrap;word-break:break-word;background:white;padding:14px;border-radius:8px;max-height:500px;overflow-y:auto;">${escapeHtml(fullContent)}</div>
+            </div>
+            
+            ${Object.keys(metadata).length > 0 ? `<div style="background:#f1f5f9;padding:16px;border-radius:10px;border:1px solid #cbd5e1;">
+                <div style="font-size:13px;color:#1e40af;font-weight:600;margin-bottom:10px;">Metadata</div>
+                <pre style="font-size:13px;color:#1e293b;background:white;padding:14px;border-radius:8px;overflow-x:auto;line-height:1.5;">${escapeHtml(JSON.stringify(metadata, null, 2))}</pre>
+            </div>` : ''}
+        </div>
+    `;
+    
+    modal.style.display = 'block';
+}
+
+function closeDetailModal() {
+    document.getElementById('detail-modal').style.display = 'none';
+}
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeDetailModal();
+});
 }
 
 async function clearAll() {
