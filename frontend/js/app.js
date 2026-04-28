@@ -30,6 +30,7 @@ function showTab(name) {
     if (name === 'langgraph') loadLangGraphInfo();
     if (name === 'documents') loadDocuments();
     if (name === 'monitor') loadMonitorStats();
+    if (name === 'compress') { updateCompressExp(); showModeDetail('layered'); }
 }
 
 async function loadDocuments() {
@@ -717,9 +718,107 @@ function setupSearchModeHandlers() {
 
 function updateCompressHint() {
     const mode = document.getElementById('compress-mode').value;
-    const hintEl = document.getElementById('compress-hint');
-    const hints = { 'none': '⚠️ 可能超出token限制', 'sliding_window': '✅ 简单高效，但丢失早期设定', 'token_limit': '✅ 保护前N条关键设定', 'summary': '✅ 保留语义，调用LLM生成摘要', 'layered': '✅ 最完整，保护重要消息' };
-    hintEl.textContent = hints[mode] || '';
+    const hints = {
+        'none': '保留完整历史，可能超出token限制',
+        'sliding_window': '只保留最近N条消息',
+        'token_limit': '控制总token数量，超出的压缩',
+        'summary': '将旧消息压缩成摘要',
+        'layered': '保护重要信息 + 摘要 + 最近消息（推荐）'
+    };
+    document.getElementById('compress-hint').textContent = hints[mode] || '';
+}
+
+function updateCompressExp() {
+    const threshold = document.getElementById('exp-threshold').value;
+    const keepRecent = document.getElementById('exp-keep-recent').value;
+    const messages = document.getElementById('exp-messages').value;
+    
+    document.getElementById('exp-threshold-val').textContent = threshold;
+    document.getElementById('exp-keep-recent-val').textContent = keepRecent;
+    document.getElementById('exp-messages-val').textContent = messages;
+    
+    renderCompressVisual(parseInt(messages), parseInt(threshold), parseInt(keepRecent));
+}
+
+function renderCompressVisual(total, threshold, keepRecent) {
+    const keywords = ['名字', '设定', '角色'];
+    let flowHtml = '';
+    
+    let importantCount = 0;
+    let compressCount = 0;
+    
+    for (let i = 1; i <= total; i++) {
+        const isImportant = keywords.some(k => i % 7 === 0);
+        const isRecent = i > total - keepRecent;
+        
+        if (total > threshold) {
+            if (isImportant) {
+                flowHtml += `<span class="msg-block msg-important">消息${i} ⭐重要</span>`;
+                importantCount++;
+            } else if (isRecent) {
+                flowHtml += `<span class="msg-block msg-recent">消息${i} 📌最近</span>`;
+            } else {
+                flowHtml += `<span class="msg-block msg-compress">消息${i}</span>`;
+                compressCount++;
+            }
+        } else {
+            flowHtml += `<span class="msg-block msg-recent">消息${i}</span>`;
+        }
+    }
+    
+    if (total > threshold && compressCount > 3) {
+        flowHtml += `<span class="msg-block msg-summary">📝 摘要 (${compressCount}条压缩)</span>`;
+    }
+    
+    document.getElementById('compress-flow').innerHTML = flowHtml;
+    
+    let resultHtml = '';
+    if (total > threshold) {
+        const saved = total - (importantCount + 1 + keepRecent);
+        resultHtml = `<div style="background:#10b981;color:white;padding:12px 24px;border-radius:8px;">
+            压缩生效！原 ${total} 条 → ${importantCount + 1 + keepRecent} 条，节省 ${saved} 条消息
+        </div>`;
+    } else {
+        resultHtml = `<div style="background:#64748b;color:white;padding:12px 24px;border-radius:8px;">
+            消息数 ${total} 未超过阈值 ${threshold}，暂不压缩
+        </div>`;
+    }
+    document.getElementById('compress-result').innerHTML = resultHtml;
+}
+
+function showModeDetail(mode) {
+    document.querySelectorAll('.mode-card').forEach(c => c.classList.remove('active'));
+    event.target.closest('.mode-card').classList.add('active');
+    
+    const details = {
+        'none': `<h4 style="color:#1e40af;">不压缩模式</h4>
+            <p style="color:#475569;line-height:1.8;">保留所有历史消息，直接发送给LLM。</p>
+            <p style="color:#dc2626;">⚠️ 缺点：可能超出token限制，导致API报错或截断。</p>
+            <p style="color:#059669;">✅ 适用：短对话、测试场景。</p>`,
+        'sliding_window': `<h4 style="color:#1e40af;">滑动窗口模式</h4>
+            <p style="color:#475569;line-height:1.8;">只保留最近N条消息，丢弃更早的历史。</p>
+            <p style="color:#dc2626;">⚠️ 缺点：丢失重要设定信息。</p>
+            <p style="color:#059669;">✅ 适用：不需要记住历史信息的场景。</p>`,
+        'token_limit': `<h4 style="color:#1e40af;">Token限制模式</h4>
+            <p style="color:#475569;line-height:1.8;">控制总token数，超出时从最早的开始删除。</p>
+            <p style="color:#dc2626;">⚠️ 缺点：可能删除重要消息。</p>
+            <p style="color:#059669;">✅ 适用：需要控制API成本的场景。</p>`,
+        'summary': `<h4 style="color:#1e40af;">摘要压缩模式</h4>
+            <p style="color:#475569;line-height:1.8;">将所有历史消息压缩成一条摘要。</p>
+            <p style="color:#dc2626;">⚠️ 缺点：摘要可能丢失细节信息。</p>
+            <p style="color:#059669;">✅ 适用：长对话、只需保留大意。</p>`,
+        'layered': `<h4 style="color:#1e40af;">分层压缩模式（推荐）</h4>
+            <p style="color:#475569;line-height:1.8;">
+                1️⃣ 检查消息数量是否超过阈值<br>
+                2️⃣ 提取包含关键词的消息 → <span style="color:#059669;font-weight:bold">重要消息</span><br>
+                3️⃣ 提取最近N条消息 → <span style="color:#3b82f6;font-weight:bold">最近消息</span><br>
+                4️⃣ 剩余消息调用LLM生成摘要 → <span style="color:#f59e0b;font-weight:bold">摘要</span><br>
+                5️⃣ 组合: 重要 + 摘要 + 最近 → 发送给LLM
+            </p>
+            <p style="color:#059669;">✅ 适用：生产环境，保护重要信息同时节省token。</p>`
+    };
+    
+    document.getElementById('mode-detail').innerHTML = details[mode] || '';
 }
 
 function showResult(elementId, type, message) {

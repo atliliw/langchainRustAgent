@@ -21,6 +21,7 @@
                 <div class="nav-item" onclick="showTab('langgraph')">🔗 LangGraph</div>
                 <div class="nav-item" onclick="showTab('aggregate')">🌐 AI聚合</div>
                 <div class="nav-item" onclick="showTab('monitor')">📊 系统监控</div>
+                <div class="nav-item" onclick="showTab('compress')">⚙️ 压缩策略</div>
                 <div class="nav-item" onclick="showTab('sessions')">📋 会话列表</div>
             </div>
         </div>
@@ -261,6 +262,86 @@
             
             <h3 style="color: #1e40af; margin-bottom: 15px; margin-top: 20px;">统计图表</h3>
             <canvas id="monitor-chart" style="max-height: 300px;"></canvas>
+        </div>
+        
+        <div id="compress-tab" class="card hidden">
+            <h2>⚙️ 压缩策略学习</h2>
+            <p style="color: #666; margin-bottom: 15px;">可视化理解对话压缩原理，实时调整参数</p>
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                <div style="background: #f8fafc; padding: 20px; border-radius: 12px;">
+                    <h3 style="color: #1e40af; margin-bottom: 15px;">📊 当前配置参数</h3>
+                    <div id="compress-config">
+                        <div class="config-item"><span>最大历史消息:</span><span id="cfg-max-history">50</span></div>
+                        <div class="config-item"><span>压缩阈值:</span><span id="cfg-threshold">15</span></div>
+                        <div class="config-item"><span>保留最近:</span><span id="cfg-keep-recent">5</span></div>
+                        <div class="config-item"><span>重要关键词:</span><span id="cfg-keywords">我的名字,我是,记住</span></div>
+                        <div class="config-item"><span>摘要模型:</span><span id="cfg-summary-model">gpt-3.5-turbo</span></div>
+                    </div>
+                </div>
+                
+                <div style="background: #f8fafc; padding: 20px; border-radius: 12px;">
+                    <h3 style="color: #1e40af; margin-bottom: 15px;">🧪 参数调整实验</h3>
+                    <div style="display: grid; gap: 10px;">
+                        <div>
+                            <label style="font-size: 13px; color: #475569;">压缩阈值:</label>
+                            <input type="range" id="exp-threshold" min="5" max="50" value="15" style="width: 100%;" oninput="updateCompressExp()">
+                            <span id="exp-threshold-val" style="color: #1e40af; font-weight: bold;">15</span>
+                        </div>
+                        <div>
+                            <label style="font-size: 13px; color: #475569;">保留最近:</label>
+                            <input type="range" id="exp-keep-recent" min="2" max="20" value="5" style="width: 100%;" oninput="updateCompressExp()">
+                            <span id="exp-keep-recent-val" style="color: #1e40af; font-weight: bold;">5</span>
+                        </div>
+                        <div>
+                            <label style="font-size: 13px; color: #475569;">模拟消息数:</label>
+                            <input type="range" id="exp-messages" min="5" max="100" value="30" style="width: 100%;" oninput="updateCompressExp()">
+                            <span id="exp-messages-val" style="color: #1e40af; font-weight: bold;">30</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <h3 style="color: #1e40af; margin-bottom: 15px; margin-top: 20px;">📈 压缩效果可视化</h3>
+            <div id="compress-visual" style="background: #f8fafc; padding: 20px; border-radius: 12px;">
+                <div id="compress-flow" style="display: flex; gap: 10px; flex-wrap: wrap; justify-content: center;"></div>
+                <div id="compress-result" style="margin-top: 15px; text-align: center;"></div>
+            </div>
+            
+            <h3 style="color: #1e40af; margin-bottom: 15px; margin-top: 20px;">📚 压缩模式对比</h3>
+            <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px;">
+                <div class="mode-card" onclick="showModeDetail('none')">
+                    <div class="mode-title">None</div>
+                    <div class="mode-desc">不压缩</div>
+                </div>
+                <div class="mode-card" onclick="showModeDetail('sliding_window')">
+                    <div class="mode-title">滑动窗口</div>
+                    <div class="mode-desc">保留最近N条</div>
+                </div>
+                <div class="mode-card" onclick="showModeDetail('token_limit')">
+                    <div class="mode-title">Token限制</div>
+                    <div class="mode-desc">控制token数</div>
+                </div>
+                <div class="mode-card" onclick="showModeDetail('summary')">
+                    <div class="mode-title">摘要压缩</div>
+                    <div class="mode-desc">全部压缩成摘要</div>
+                </div>
+                <div class="mode-card active" onclick="showModeDetail('layered')">
+                    <div class="mode-title">分层压缩</div>
+                    <div class="mode-desc">重要+摘要+最近</div>
+                </div>
+            </div>
+            
+            <div id="mode-detail" style="background: #eff6ff; padding: 20px; border-radius: 12px; margin-top: 15px;">
+                <h4 style="color: #1e40af;">分层压缩流程</h4>
+                <div style="margin-top: 10px; line-height: 1.8; color: #475569;">
+                    <p>1️⃣ 检查消息数量是否超过阈值 (threshold)</p>
+                    <p>2️⃣ 提取包含关键词的消息 → <span style="color: #059669; font-weight: bold;">重要消息</span></p>
+                    <p>3️⃣ 提取最近N条消息 → <span style="color: #3b82f6; font-weight: bold;">最近消息</span></p>
+                    <p>4️⃣ 剩余消息调用LLM生成摘要 → <span style="color: #f59e0b; font-weight: bold;">摘要</span></p>
+                    <p>5️⃣ 组合: 重要 + 摘要 + 最近 → 发送给LLM</p>
+                </div>
+            </div>
         </div>
         
         <div id="sessions-tab" class="card hidden">

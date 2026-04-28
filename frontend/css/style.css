@@ -256,3 +256,19 @@ pre { background: #f1f5f9; padding: 16px; border-radius: 8px; font-size: 12px; }
 .dark-mode table th { background: #334155; }
 .dark-mode table td { border-color: #475569; }
 .dark-mode h2, .dark-mode h3 { color: #60a5fa; }
+
+.config-item { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #e2e8f0; }
+.config-item span:first-child { color: #64748b; }
+.config-item span:last-child { color: #1e40af; font-weight: 600; }
+
+.mode-card { background: white; padding: 15px; border-radius: 8px; border: 2px solid #e2e8f0; cursor: pointer; text-align: center; transition: all 0.2s; }
+.mode-card:hover { border-color: #3b82f6; background: #eff6ff; }
+.mode-card.active { border-color: #1e40af; background: #dbeafe; }
+.mode-title { font-weight: 600; color: #1e293b; font-size: 14px; }
+.mode-desc { color: #64748b; font-size: 12px; margin-top: 4px; }
+
+.msg-block { display: inline-block; padding: 8px 12px; border-radius: 6px; font-size: 12px; margin: 4px; }
+.msg-important { background: #d1fae5; color: #059669; border: 1px solid #10b981; }
+.msg-recent { background: #dbeafe; color: #3b82f6; border: 1px solid #3b82f6; }
+.msg-compress { background: #fef3c7; color: #b45309; border: 1px solid #f59e0b; }
+.msg-summary { background: #fce7f3; color: #be185d; border: 1px solid #ec4899; }
