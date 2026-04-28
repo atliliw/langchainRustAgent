@@ -1,6 +1,9 @@
 const API_BASE = '/api';
 let currentSessionId = null;
 let displayedText = '';
+let searchHistory = JSON.parse(localStorage.getItem('searchHistory') || '[]');
+let currentPage = 1;
+let pageSize = 10;
 
 async function fetchStats() {
     try {
@@ -26,6 +29,7 @@ function showTab(name) {
     if (name === 'sessions') loadAllSessions();
     if (name === 'langgraph') loadLangGraphInfo();
     if (name === 'documents') loadDocuments();
+    if (name === 'monitor') loadMonitorStats();
 }
 
 async function loadDocuments() {
@@ -35,14 +39,53 @@ async function loadDocuments() {
         const res = await fetch(`${API_BASE}/documents`);
         const documents = await res.json();
         if (documents.length === 0) { listEl.innerHTML = '<p style="color: #666;">暂无文档，请先上传</p>'; return; }
-        let html = '<table style="width: 100%; border-collapse: collapse;"><thead><tr style="background: rgba(255,255,255,0.1);">';
-        html += '<th style="padding: 10px; border: 1px solid rgba(255,255,255,0.1);">文档标题</th><th style="padding: 10px; border: 1px solid rgba(255,255,255,0.1);">Chunk数量</th><th style="padding: 10px; border: 1px solid rgba(255,255,255,0.1);">内容预览</th><th style="padding: 10px; border: 1px solid rgba(255,255,255,0.1);">操作</th></tr></thead><tbody>';
+        let html = '<table style="width: 100%; border-collapse: collapse;"><thead><tr style="background: #f1f5f9;">';
+        html += '<th style="padding: 12px; border: 1px solid #e2e8f0;">文档标题</th><th style="padding: 12px; border: 1px solid #e2e8f0;">Chunk数量</th><th style="padding: 12px; border: 1px solid #e2e8f0;">内容预览</th><th style="padding: 12px; border: 1px solid #e2e8f0;">操作</th></tr></thead><tbody>';
         documents.forEach(doc => {
-            html += `<tr><td style="padding: 10px; border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(doc.title)}</td><td style="padding: 10px; border: 1px solid rgba(255,255,255,0.1); text-align: center;">${doc.chunk_count}</td><td style="padding: 10px; border: 1px solid rgba(255,255,255,0.1); color: #a2a2a2; font-size: 12px;">${escapeHtml(doc.content_preview)}...</td><td style="padding: 10px; border: 1px solid rgba(255,255,255,0.1);"><button class="btn btn-danger btn-small" onclick="deleteDocument('${doc.id}', '${escapeHtml(doc.title)}')">删除</button></td></tr>`;
+            html += `<tr>
+                <td style="padding: 12px; border: 1px solid #e2e8f0;">${escapeHtml(doc.title)}</td>
+                <td style="padding: 12px; border: 1px solid #e2e8f0; text-align: center;">${doc.chunk_count}</td>
+                <td style="padding: 12px; border: 1px solid #e2e8f0; color: #64748b; font-size: 13px;">${escapeHtml(doc.content_preview)}...</td>
+                <td style="padding: 12px; border: 1px solid #e2e8f0;">
+                    <button class="btn btn-small" onclick="previewDocument('${doc.id}', '${escapeHtml(doc.title)}')">预览</button>
+                    <button class="btn btn-small btn-danger" onclick="deleteDocument('${doc.id}', '${escapeHtml(doc.title)}')">删除</button>
+                </td>
+            </tr>`;
         });
         html += '</tbody></table>';
         listEl.innerHTML = html;
     } catch (e) { listEl.innerHTML = `<div class="error">加载失败: ${e.message}</div>`; }
+}
+
+async function previewDocument(parentId, title) {
+    try {
+        const res = await fetch(`${API_BASE}/search/bm25`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({query: title, top_k: 20})
+        });
+        const data = await res.json();
+        const chunks = data.results.filter(r => r.metadata?.parent_id === parentId);
+        
+        const modal = document.getElementById('detail-modal');
+        const contentDiv = document.getElementById('detail-content');
+        
+        let html = `<h3 style="color:#1e40af;margin-bottom:16px;">📄 ${escapeHtml(title)} (${chunks.length} chunks)</h3>`;
+        html += '<div style="display:grid;gap:12px;max-height:70vh;overflow-y:auto;">';
+        chunks.forEach((chunk, idx) => {
+            html += `<div class="chunk-card">
+                <div class="chunk-header">
+                    <span style="background:#1e40af;color:white;padding:4px 10px;border-radius:4px;font-size:12px;">Chunk ${idx + 1}</span>
+                    <span style="font-size:12px;color:#64748b;">BM25: ${chunk.score.toFixed(2)}</span>
+                </div>
+                <div class="chunk-content">${escapeHtml(chunk.content)}</div>
+            </div>`;
+        });
+        html += '</div>';
+        
+        contentDiv.innerHTML = html;
+        modal.style.display = 'block';
+    } catch (e) { alert('加载预览失败: ' + e.message); }
 }
 
 async function deleteDocument(parentId, filename) {
@@ -73,15 +116,52 @@ async function uploadFile(file) {
     document.getElementById('upload-progress').classList.add('hidden');
 }
 
+async function uploadMultipleFiles(files) {
+    const allowed = ['.txt', '.pdf', '.md', '.json', '.csv'];
+    let successCount = 0;
+    let failCount = 0;
+    let totalChunks = 0;
+    
+    showResult('upload-result', 'loading', `正在批量上传 ${files.length} 个文件...`);
+    document.getElementById('upload-progress').classList.remove('hidden');
+    
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
+        if (!allowed.includes(ext)) { failCount++; continue; }
+        
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        try {
+            const res = await fetch(`${API_BASE}/upload`, { method: 'POST', body: formData });
+            const data = await res.json();
+            if (data.success) { successCount++; totalChunks += data.chunk_count; }
+            else failCount++;
+            
+            const progress = ((i + 1) / files.length) * 100;
+            document.getElementById('progress-bar').style.width = progress + '%';
+            showResult('upload-result', 'loading', `上传进度: ${i+1}/${files.length}`);
+        } catch (e) { failCount++; }
+    }
+    
+    document.getElementById('upload-progress').classList.add('hidden');
+    showResult('upload-result', 'success', `批量上传完成<br>成功: ${successCount} 个<br>失败: ${failCount} 个<br>总块数: ${totalChunks}`);
+    fetchStats(); loadDocuments();
+}
+
 async function bm25Search() {
     const query = document.getElementById('bm25-query').value.trim();
     const topK = parseInt(document.getElementById('bm25-top-k').value) || 5;
     if (!query) { showResult('bm25-results', 'error', '请输入搜索内容'); return; }
+    saveSearchHistory(query);
     showResult('bm25-results', 'loading', '正在搜索...');
+    currentPage = 1;
     try {
         const res = await fetch(`${API_BASE}/search/bm25`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({query, top_k: topK}) });
         const data = await res.json();
-        document.getElementById('bm25-results').innerHTML = `<h3 style="color: #4caf50; margin-top: 15px;">BM25检索 (${data.total_count}条)</h3>${renderResults(data.results)}`;
+        window._bm25Results = data.results;
+        document.getElementById('bm25-results').innerHTML = `<h3 style="color: #4caf50; margin-top: 15px;">BM25检索 (${data.total_count}条)</h3>${renderSearchHistory()}${renderPaginatedResults('bm25', data.results)}`;
     } catch (e) { showResult('bm25-results', 'error', `搜索失败: ${e.message}`); }
 }
 
@@ -89,11 +169,14 @@ async function vectorSearch() {
     const query = document.getElementById('vector-query').value.trim();
     const topK = parseInt(document.getElementById('vector-top-k').value) || 5;
     if (!query) { showResult('vector-results', 'error', '请输入搜索内容'); return; }
+    saveSearchHistory(query);
     showResult('vector-results', 'loading', '正在搜索...');
+    currentPage = 1;
     try {
         const res = await fetch(`${API_BASE}/search/vector`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({query, top_k: topK}) });
         const data = await res.json();
-        document.getElementById('vector-results').innerHTML = `<h3 style="color: #e94560; margin-top: 15px;">向量检索 (${data.total_count}条)</h3>${renderResults(data.results)}`;
+        window._vectorResults = data.results;
+        document.getElementById('vector-results').innerHTML = `<h3 style="color: #e94560; margin-top: 15px;">向量检索 (${data.total_count}条)</h3>${renderSearchHistory()}${renderPaginatedResults('vector', data.results)}`;
     } catch (e) { showResult('vector-results', 'error', `搜索失败: ${e.message}`); }
 }
 
@@ -159,10 +242,76 @@ function renderResults(results) {
 
 function copyToClipboard(text) {
     navigator.clipboard.writeText(text).then(() => {
-        alert('已复制到剪贴板');
+        showToast('已复制到剪贴板');
     }).catch(err => {
         console.error('复制失败:', err);
     });
+}
+
+function saveSearchHistory(query) {
+    if (!query || query.length < 2) return;
+    searchHistory = searchHistory.filter(h => h !== query);
+    searchHistory.unshift(query);
+    searchHistory = searchHistory.slice(0, 20);
+    localStorage.setItem('searchHistory', JSON.stringify(searchHistory));
+}
+
+function renderSearchHistory() {
+    if (searchHistory.length === 0) return '';
+    let html = '<div class="search-history"><span style="color:#64748b;font-size:13px;">搜索历史：</span>';
+    searchHistory.slice(0, 5).forEach(h => {
+        html += `<span class="history-item" onclick="quickSearch('${escapeHtml(h)}')">${escapeHtml(h.length > 20 ? h.substring(0,20)+'...' : h)}</span>`;
+    });
+    html += '</div>';
+    return html;
+}
+
+function quickSearch(query) {
+    const activeTab = document.querySelector('.nav-item.active');
+    if (activeTab) {
+        const tabName = activeTab.getAttribute('onclick').match(/showTab\('(\w+)'\)/)?.[1];
+        if (tabName === 'bm25') document.getElementById('bm25-query').value = query;
+        else if (tabName === 'vector') document.getElementById('vector-query').value = query;
+        else if (tabName === 'compare') document.getElementById('compare-query').value = query;
+    }
+}
+
+function renderPaginatedResults(type, results) {
+    if (results.length === 0) return '<p style="color: #64748b;">无结果</p>';
+    window._searchResults = results;
+    
+    const totalPages = Math.ceil(results.length / pageSize);
+    const start = (currentPage - 1) * pageSize;
+    const end = start + pageSize;
+    const pageResults = results.slice(start, end);
+    
+    let html = renderResults(pageResults);
+    
+    if (totalPages > 1) {
+        html += `<div class="pagination">
+            <button class="page-btn" onclick="changePage('${type}', -1)" ${currentPage === 1 ? 'disabled' : ''}>上一页</button>
+            <span class="page-info">${currentPage}/${totalPages}</span>
+            <button class="page-btn" onclick="changePage('${type}', 1)" ${currentPage === totalPages ? 'disabled' : ''}>下一页</button>
+        </div>`;
+    }
+    
+    return html;
+}
+
+function changePage(type, delta) {
+    currentPage += delta;
+    const results = type === 'bm25' ? window._bm25Results : 
+                    type === 'vector' ? window._vectorResults : window._searchResults;
+    const containerId = type === 'bm25' ? 'bm25-results' : 
+                        type === 'vector' ? 'vector-results' : 'compare-results';
+    
+    const totalPages = Math.ceil(results.length / pageSize);
+    currentPage = Math.max(1, Math.min(currentPage, totalPages));
+    
+    document.getElementById(containerId).innerHTML = 
+        `<h3 style="color: #4caf50; margin-top: 15px;">${type}检索 (${results.length}条)</h3>` +
+        renderSearchHistory() + 
+        renderPaginatedResults(type, results);
 }
 
 function openDetailModal(idx) {
@@ -262,7 +411,11 @@ async function loadSessions() {
         let html = '';
         sessions.forEach(s => {
             const isActive = s.session_id === currentSessionId;
-            html += `<div class="session-item ${isActive ? 'active' : ''}" onclick="loadSession('${s.session_id}')"><div>${s.preview || '新对话'}</div><div class="time">${formatTime(s.created_at)} (${s.message_count}条)</div></div>`;
+            const title = s.title || s.preview || '新对话';
+            html += `<div class="session-item ${isActive ? 'active' : ''}" onclick="loadSession('${s.session_id}')">
+                <div class="session-title">${escapeHtml(title)}</div>
+                <div class="time">${formatTime(s.created_at)} (${s.message_count}条)</div>
+            </div>`;
         });
         document.getElementById('session-list').innerHTML = html || '<div style="color: #a2a2a2; font-size: 12px;">暂无历史会话</div>';
     } catch (e) { document.getElementById('session-list').innerHTML = `<div class="error">加载失败: ${e.message}</div>`; }
@@ -285,7 +438,19 @@ async function loadSession(sessionId) {
         const res = await fetch(`${API_BASE}/chat/history/${sessionId}`);
         const messages = await res.json();
         let html = '';
-        messages.forEach(m => { const roleClass = m.role === 'user' ? 'user' : 'assistant'; html += `<div class="message ${roleClass}"><div>${escapeHtml(m.content)}</div><div class="time">${formatTime(m.timestamp)}</div></div>`; });
+        messages.forEach(m => {
+            const roleClass = m.role === 'user' ? 'user' : 'assistant';
+            const msgId = m.id;
+            html += `<div class="message ${roleClass}" data-msg-id="${msgId}">
+                <div class="message-content">${escapeHtml(m.content)}</div>
+                <div class="message-actions">
+                    <button class="msg-btn copy-btn" onclick="copyMessage('${msgId}')">📋</button>
+                    <button class="msg-btn edit-btn" onclick="editMessageUI('${msgId}')">✏️</button>
+                    <button class="msg-btn delete-btn" onclick="deleteMessageUI('${msgId}')">🗑️</button>
+                </div>
+                <div class="time">${formatTime(m.time_created)}</div>
+            </div>`;
+        });
         document.getElementById('chat-messages').innerHTML = html || '<div style="text-align: center; color: #a2a2a2; padding: 40px;">空会话</div>';
         loadSessions();
     } catch (e) { document.getElementById('chat-messages').innerHTML = `<div class="error">加载失败: ${e.message}</div>`; }
@@ -357,6 +522,106 @@ async function deleteSession(sessionId) {
         if (currentSessionId === sessionId) newSession();
         loadAllSessions(); fetchStats();
     } catch (e) { alert(`删除失败: ${e.message}`); }
+}
+
+function copyMessage(msgId) {
+    const msgEl = document.querySelector(`.message[data-msg-id="${msgId}"] .message-content`);
+    if (msgEl) {
+        navigator.clipboard.writeText(msgEl.textContent).then(() => {
+            showToast('已复制到剪贴板');
+        });
+    }
+}
+
+async function editMessageUI(msgId) {
+    const msgEl = document.querySelector(`.message[data-msg-id="${msgId}"]`);
+    const contentEl = msgEl.querySelector('.message-content');
+    const originalContent = contentEl.textContent;
+    
+    const newContent = prompt('编辑消息内容:', originalContent);
+    if (newContent === null || newContent === originalContent) return;
+    
+    try {
+        await fetch(`${API_BASE}/chat/message/${msgId}`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({content: newContent})
+        });
+        contentEl.textContent = newContent;
+        showToast('消息已更新');
+    } catch (e) {
+        alert('更新失败: ' + e.message);
+    }
+}
+
+async function deleteMessageUI(msgId) {
+    if (!confirm('确定删除这条消息？')) return;
+    
+    try {
+        await fetch(`${API_BASE}/chat/message/${msgId}`, {method: 'DELETE'});
+        const msgEl = document.querySelector(`.message[data-msg-id="${msgId}"]`);
+        if (msgEl) msgEl.remove();
+        showToast('消息已删除');
+        loadSessions();
+    } catch (e) {
+        alert('删除失败: ' + e.message);
+    }
+}
+
+function showToast(message) {
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 2000);
+}
+
+function initDarkMode() {
+    const savedMode = localStorage.getItem('darkMode');
+    if (savedMode === 'true') {
+        document.body.classList.add('dark-mode');
+    }
+}
+
+function toggleDarkMode() {
+    document.body.classList.toggle('dark-mode');
+    const isDark = document.body.classList.contains('dark-mode');
+    localStorage.setItem('darkMode', isDark);
+    showToast(isDark ? '已切换到深色模式' : '已切换到浅色模式');
+}
+
+async function loadMonitorStats() {
+    try {
+        const res = await fetch(`${API_BASE}/monitor/stats`);
+        const stats = await res.json();
+        
+        document.getElementById('monitor-total-calls').textContent = stats.total_calls;
+        document.getElementById('monitor-total-tokens').textContent = stats.total_tokens;
+        document.getElementById('monitor-calls-today').textContent = stats.calls_today;
+        document.getElementById('monitor-tokens-today').textContent = stats.tokens_today;
+        
+        const successRate = stats.total_calls > 0 ? ((stats.success_count / stats.total_calls) * 100).toFixed(1) + '%' : '--';
+        document.getElementById('monitor-success-rate').textContent = '成功率: ' + successRate;
+        
+        const avgDuration = stats.avg_duration_today_ms > 0 ? stats.avg_duration_today_ms + 'ms' : '--';
+        document.getElementById('monitor-avg-duration').textContent = '平均耗时: ' + avgDuration;
+        
+        let typesHtml = '';
+        stats.api_types.forEach(t => {
+            typesHtml += `<div style="display:flex;justify-content:space-between;padding:12px;background:#f8fafc;border-radius:8px;">
+                <span style="font-weight:500;color:#1e40af;">${t.api_type}</span>
+                <div style="display:flex;gap:20px;">
+                    <span style="color:#64748b;">调用: ${t.call_count}</span>
+                    <span style="color:#059669;">Token: ${t.tokens_used}</span>
+                    <span style="color:#f59e0b;">平均: ${t.avg_duration_ms}ms</span>
+                </div>
+            </div>`;
+        });
+        document.getElementById('monitor-api-types').innerHTML = typesHtml || '<div style="color:#64748b;">暂无数据</div>';
+    } catch (e) {
+        console.error('加载监控数据失败:', e);
+        showToast('加载监控数据失败');
+    }
 }
 
 function handleKeyPress(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }
@@ -463,8 +728,28 @@ document.addEventListener('DOMContentLoaded', function() {
     uploadArea.addEventListener('click', () => fileInput.click());
     uploadArea.addEventListener('dragover', (e) => { e.preventDefault(); uploadArea.classList.add('dragover'); });
     uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
-    uploadArea.addEventListener('drop', (e) => { e.preventDefault(); uploadArea.classList.remove('dragover'); if (e.dataTransfer.files.length > 0) uploadFile(e.dataTransfer.files[0]); });
-    fileInput.addEventListener('change', (e) => { if (e.target.files.length > 0) uploadFile(e.target.files[0]); });
+    uploadArea.addEventListener('drop', (e) => { 
+        e.preventDefault(); 
+        uploadArea.classList.remove('dragover'); 
+        const files = e.dataTransfer.files;
+        if (files.length > 1) {
+            if (confirm(`检测到 ${files.length} 个文件，是否批量上传？`)) {
+                uploadMultipleFiles(files);
+            } else {
+                uploadFile(files[0]);
+            }
+        } else if (files.length > 0) {
+            uploadFile(files[0]);
+        }
+    });
+    fileInput.addEventListener('change', (e) => { 
+        const files = e.target.files;
+        if (files.length > 1) {
+            uploadMultipleFiles(files);
+        } else if (files.length > 0) {
+            uploadFile(files[0]);
+        }
+    });
     
     setupSearchModeHandlers();
     document.getElementById('compress-mode').addEventListener('change', updateCompressHint);
@@ -480,4 +765,6 @@ document.addEventListener('DOMContentLoaded', function() {
     if (savedSessionId) { currentSessionId = savedSessionId; loadSession(savedSessionId); }
     
     loadLangGraphInfo();
+    
+    initDarkMode();
 });

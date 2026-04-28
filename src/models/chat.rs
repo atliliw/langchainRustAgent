@@ -113,3 +113,8 @@ pub struct CompressModeInfo {
     pub label: String,
     pub description: String,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EditMessageRequest {
+    pub content: String,
+}

@@ -16,6 +16,7 @@ use sqlx::{SqlitePool, sqlite::SqlitePoolOptions, Row};
 use std::sync::Arc;
 use chrono::Utc;
 use futures_util::Stream;
+use serde::{Serialize, Deserialize};
 
 pub struct ConversationStore {
     pool: SqlitePool,
@@ -112,6 +113,25 @@ impl ConversationStore {
             .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
         
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_session_updated ON session(time_updated)")
+            .execute(pool)
+            .await
+            .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS api_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_type TEXT NOT NULL,
+                tokens_used INTEGER DEFAULT 0,
+                duration_ms INTEGER DEFAULT 0,
+                success INTEGER DEFAULT 1,
+                time_created INTEGER NOT NULL
+            )"
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_api_stats_time ON api_stats(time_created)")
             .execute(pool)
             .await
             .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
@@ -441,13 +461,68 @@ impl ConversationStore {
         Ok(())
     }
     
+    pub async fn update_session_title(&self, session_id: &str, title: &str) -> Result<(), ConversationError> {
+        let now = Utc::now().timestamp_millis();
+        
+        sqlx::query("UPDATE session SET title = ?, time_updated = ? WHERE id = ?")
+            .bind(title).bind(now).bind(session_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        
+        Ok(())
+    }
+    
+    fn generate_title_from_message(content: &str) -> String {
+        let title = content.trim();
+        if title.len() > 50 {
+            title.chars().take(50).collect::<String>() + "..."
+        } else {
+            title.to_string()
+        }
+    }
+    
     async fn save_message(&self, session_id: &str, role: &str, content: &str) -> Result<(), ConversationError> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().timestamp_millis();
         let tokens = Self::estimate_tokens(content) as i64;
         
+        let count_row = sqlx::query("SELECT COUNT(*) FROM message WHERE session_id = ?")
+            .bind(session_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        let msg_count: i64 = count_row.get(0);
+        
+        if msg_count == 0 && role == "user" {
+            let title = Self::generate_title_from_message(content);
+            self.update_session_title(session_id, &title).await?;
+        }
+        
         sqlx::query("INSERT INTO message (id, session_id, role, content, tokens, time_created) VALUES (?, ?, ?, ?, ?, ?)")
             .bind(&id).bind(session_id).bind(role).bind(content).bind(tokens).bind(now)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        
+        Ok(())
+    }
+    
+    pub async fn edit_message(&self, message_id: &str, content: &str) -> Result<(), ConversationError> {
+        let tokens = Self::estimate_tokens(content) as i64;
+        
+        sqlx::query("UPDATE message SET content = ?, tokens = ? WHERE id = ?")
+            .bind(content).bind(tokens).bind(message_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        
+        Ok(())
+    }
+    
+    pub async fn delete_message(&self, message_id: &str) -> Result<(), ConversationError> {
+        sqlx::query("DELETE FROM message WHERE id = ?")
+            .bind(message_id)
             .execute(&self.pool)
             .await
             .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
@@ -559,4 +634,86 @@ impl ConversationStore {
             CompressModeInfo { name: "layered".to_string(), label: "分层压缩".to_string(), description: "保护重要+摘要+最近".to_string() },
         ]
     }
+    
+    pub async fn record_api_call(&self, api_type: &str, tokens: i64, duration_ms: i64, success: bool) -> Result<(), ConversationError> {
+        let now = Utc::now().timestamp_millis();
+        
+        sqlx::query("INSERT INTO api_stats (api_type, tokens_used, duration_ms, success, time_created) VALUES (?, ?, ?, ?, ?)")
+            .bind(api_type).bind(tokens).bind(duration_ms).bind(success as i64).bind(now)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        
+        Ok(())
+    }
+    
+    pub async fn get_api_stats(&self) -> Result<ApiStatsSummary, ConversationError> {
+        let now = Utc::now().timestamp_millis();
+        let day_ago = now - 86400000;
+        let week_ago = now - 604800000;
+        
+        let total_row = sqlx::query("SELECT COUNT(*), SUM(tokens_used), SUM(duration_ms), SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) FROM api_stats")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        
+        let day_row = sqlx::query("SELECT COUNT(*), SUM(tokens_used), AVG(duration_ms) FROM api_stats WHERE time_created > ?")
+            .bind(day_ago)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        
+        let week_row = sqlx::query("SELECT COUNT(*), SUM(tokens_used) FROM api_stats WHERE time_created > ?")
+            .bind(week_ago)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        
+        let type_rows = sqlx::query("SELECT api_type, COUNT(*), SUM(tokens_used), AVG(duration_ms) FROM api_stats GROUP BY api_type")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        
+        let api_types: Vec<ApiTypeStats> = type_rows.into_iter().map(|row| ApiTypeStats {
+            api_type: row.get::<String, _>(0),
+            call_count: row.get::<i64, _>(1),
+            tokens_used: row.get::<i64, _>(2),
+            avg_duration_ms: row.get::<f64, _>(3) as i64,
+        }).collect();
+        
+        Ok(ApiStatsSummary {
+            total_calls: total_row.get::<i64, _>(0),
+            total_tokens: total_row.get::<i64, _>(1),
+            total_duration_ms: total_row.get::<i64, _>(2),
+            success_count: total_row.get::<i64, _>(3),
+            calls_today: day_row.get::<i64, _>(0),
+            tokens_today: day_row.get::<i64, _>(1),
+            avg_duration_today_ms: day_row.get::<f64, _>(2) as i64,
+            calls_this_week: week_row.get::<i64, _>(0),
+            tokens_this_week: week_row.get::<i64, _>(1),
+            api_types,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ApiStatsSummary {
+    pub total_calls: i64,
+    pub total_tokens: i64,
+    pub total_duration_ms: i64,
+    pub success_count: i64,
+    pub calls_today: i64,
+    pub tokens_today: i64,
+    pub avg_duration_today_ms: i64,
+    pub calls_this_week: i64,
+    pub tokens_this_week: i64,
+    pub api_types: Vec<ApiTypeStats>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ApiTypeStats {
+    pub api_type: String,
+    pub call_count: i64,
+    pub tokens_used: i64,
+    pub avg_duration_ms: i64,
 }

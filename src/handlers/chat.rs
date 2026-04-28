@@ -131,3 +131,26 @@ pub async fn clear_session(
         "message": format!("会话 {} 已清空", session_id)
     })))
 }
+
+pub async fn edit_message(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<String>,
+    Json(request): Json<EditMessageRequest>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    state.api.edit_message(&message_id, &request.content).await?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "消息已更新"
+    })))
+}
+
+pub async fn delete_message(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    state.api.delete_message(&message_id).await?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "消息已删除"
+    })))
+}

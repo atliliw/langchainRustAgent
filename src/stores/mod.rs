@@ -9,4 +9,6 @@ pub use bm25::BM25Store;
 pub use hybrid::HybridStore;
 pub use hybrid::HybridSearchResult;
 pub use conversation::ConversationStore;
+pub use conversation::ApiStatsSummary;
+pub use conversation::ApiTypeStats;
 pub use content_store::ContentStore;

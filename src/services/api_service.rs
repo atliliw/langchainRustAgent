@@ -6,6 +6,7 @@ use crate::models::*;
 use crate::stores::*;
 use crate::utils::DocumentProcessor;
 use crate::services::LangGraphDemoService;
+use crate::stores::ApiStatsSummary;
 use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -288,6 +289,16 @@ impl ApiService {
         Ok(())
     }
     
+    pub async fn edit_message(&self, message_id: &str, content: &str) -> Result<(), ApiError> {
+        self.conversation_store.edit_message(message_id, content).await?;
+        Ok(())
+    }
+    
+    pub async fn delete_message(&self, message_id: &str) -> Result<(), ApiError> {
+        self.conversation_store.delete_message(message_id).await?;
+        Ok(())
+    }
+    
     pub async fn clear_all(&self) -> Result<(), ApiError> {
         self.vector_store.clear().await?;
         self.bm25_store.clear()?;
@@ -331,5 +342,15 @@ impl ApiService {
     pub async fn run_langgraph_stream(input: String) -> Result<Vec<StreamDemoEvent>, ApiError> {
         let service = LangGraphDemoService::new();
         service.run_stream_demo(input).await.map_err(|e| ApiError::SearchError(e.to_string()))
+    }
+    
+    pub async fn get_api_stats(&self) -> Result<ApiStatsSummary, ApiError> {
+        let stats = self.conversation_store.get_api_stats().await?;
+        Ok(stats)
+    }
+    
+    pub async fn record_api_call(&self, api_type: &str, tokens: i64, duration_ms: i64, success: bool) -> Result<(), ApiError> {
+        self.conversation_store.record_api_call(api_type, tokens, duration_ms, success).await?;
+        Ok(())
     }
 }

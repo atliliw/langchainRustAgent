@@ -189,3 +189,64 @@ th { background: #f1f5f9; padding: 12px; font-weight: 600; color: #1e40af; }
 td { padding: 12px; border-bottom: 1px solid #e2e8f0; }
 
 pre { background: #f1f5f9; padding: 16px; border-radius: 8px; font-size: 12px; }
+
+.message-actions { display: flex; gap: 8px; margin-top: 8px; opacity: 0; transition: opacity 0.2s; }
+.message:hover .message-actions { opacity: 1; }
+.msg-btn { padding: 4px 8px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; background: rgba(0,0,0,0.1); }
+.msg-btn:hover { background: rgba(0,0,0,0.2); }
+.delete-btn:hover { background: #fecaca; }
+
+.toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: #1e40af; color: white; padding: 12px 24px; border-radius: 8px;
+    z-index: 1000; animation: fadeIn 0.3s;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+.search-history { margin: 10px 0; padding: 8px; background: #f1f5f9; border-radius: 6px; }
+.history-item { 
+    display: inline-block; margin: 4px; padding: 4px 12px; 
+    background: white; border-radius: 4px; cursor: pointer; 
+    font-size: 12px; color: #1e40af; border: 1px solid #e2e8f0;
+}
+.history-item:hover { background: #dbeafe; }
+
+.pagination { display: flex; justify-content: center; gap: 12px; margin-top: 16px; }
+.page-btn { padding: 8px 16px; background: #1e40af; color: white; border: none; border-radius: 6px; cursor: pointer; }
+.page-btn:disabled { background: #94a3b8; cursor: not-allowed; }
+.page-info { padding: 8px 16px; color: #475569; }
+
+.session-title { font-weight: 500; color: #1e293b; }
+
+.chunk-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; }
+.chunk-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.chunk-content { color: #475569; line-height: 1.6; white-space: pre-wrap; font-size: 14px; }
+
+.dark-mode-toggle { 
+    position: fixed; top: 20px; right: 20px; 
+    padding: 8px 12px; background: #1e40af; color: white; 
+    border: none; border-radius: 6px; cursor: pointer; 
+    z-index: 1000; font-size: 14px;
+}
+
+.dark-mode { background: #1e293b; color: #e2e8f0; }
+.dark-mode .main-content { background: #0f172a; }
+.dark-mode .card { background: #1e293b; }
+.dark-mode .upload-area { background: #334155; border-color: #475569; }
+.dark-mode .upload-area:hover { background: #475569; }
+.dark-mode input, .dark-mode textarea, .dark-mode select { 
+    background: #334155; border-color: #475569; color: #e2e8f0; 
+}
+.dark-mode .chat-messages { background: #334155; }
+.dark-mode .message.assistant { background: #334155; color: #e2e8f0; }
+.dark-mode .session-item { background: #334155; }
+.dark-mode .session-item:hover { background: #475569; }
+.dark-mode .stat-item { background: #334155; }
+.dark-mode .stat-item .value { color: #60a5fa; }
+.dark-mode .search-history { background: #334155; }
+.dark-mode .history-item { background: #1e293b; color: #60a5fa; border-color: #475569; }
+.dark-mode .chunk-card { background: #334155; border-color: #475569; }
+.dark-mode .chunk-content { color: #cbd5e1; }
+.dark-mode table th { background: #334155; }
+.dark-mode table td { border-color: #475569; }
+.dark-mode h2, .dark-mode h3 { color: #60a5fa; }
