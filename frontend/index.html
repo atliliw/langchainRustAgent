@@ -18,6 +18,7 @@
                 <div class="nav-item" onclick="showTab('compare')">⚡ 搜索对比</div>
                 <div class="nav-item" onclick="showTab('chat')">💬 RAG对话</div>
                 <div class="nav-item" onclick="showTab('langgraph')">🔗 LangGraph</div>
+                <div class="nav-item" onclick="showTab('aggregate')">🌐 AI聚合</div>
                 <div class="nav-item" onclick="showTab('sessions')">📋 会话列表</div>
             </div>
         </div>
@@ -174,6 +175,56 @@
             <div id="langgraph-results"></div>
         </div>
         
+        <div id="aggregate-tab" class="card hidden">
+            <h2>🌐 AI信息聚合</h2>
+            <p style="color: #666; margin-bottom: 15px;">采集GitHub、Hacker News、RSS博客、ArXiv论文的AI Agent相关内容</p>
+            
+            <div class="aggregate-stats" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px;">
+                <div class="stat-card" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 8px;">
+                    <div style="font-size: 28px; font-weight: bold;" id="agg-total">0</div>
+                    <div style="font-size: 12px;">总内容数</div>
+                </div>
+                <div class="stat-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; padding: 15px; border-radius: 8px;">
+                    <div style="font-size: 28px; font-weight: bold;" id="agg-github">0</div>
+                    <div style="font-size: 12px;">GitHub</div>
+                </div>
+                <div class="stat-card" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); color: white; padding: 15px; border-radius: 8px;">
+                    <div style="font-size: 28px; font-weight: bold;" id="agg-hn">0</div>
+                    <div style="font-size: 12px;">Hacker News</div>
+                </div>
+                <div class="stat-card" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); color: white; padding: 15px; border-radius: 8px;">
+                    <div style="font-size: 28px; font-weight: bold;" id="agg-arxiv">0</div>
+                    <div style="font-size: 12px;">ArXiv</div>
+                </div>
+            </div>
+            
+            <div style="margin-bottom: 20px;">
+                <button class="btn" onclick="collectAll()" id="collect-btn">🚀 开始采集</button>
+                <button class="btn" onclick="loadAggregateList()" style="margin-left: 10px;">🔄 刷新列表</button>
+                <span id="collect-status" style="margin-left: 15px; color: #666;"></span>
+            </div>
+            
+            <div style="margin-bottom: 15px; display: flex; gap: 10px; align-items: center;">
+                <span style="color: #666;">数据源筛选：</span>
+                <select id="agg-source-filter" onchange="loadAggregateList()" style="padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px;">
+                    <option value="">全部</option>
+                    <option value="github">GitHub</option>
+                    <option value="hackernews">Hacker News</option>
+                    <option value="rss">RSS博客</option>
+                    <option value="arxiv">ArXiv</option>
+                </select>
+                <span style="color: #666; margin-left: 20px;">搜索：</span>
+                <input type="text" id="agg-search-input" placeholder="搜索内容..." style="padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; width: 200px;">
+                <button class="btn btn-small" onclick="aggregateSearch()">搜索</button>
+            </div>
+            
+            <div id="aggregate-list" style="max-height: 600px; overflow-y: auto;">
+                <div style="text-align: center; color: #666; padding: 40px;">
+                    <p>点击"开始采集"获取最新AI动态</p>
+                </div>
+            </div>
+        </div>
+        
         <div id="sessions-tab" class="card hidden">
             <h2>会话管理</h2>
             <div id="sessions-list"></div>
@@ -187,5 +238,6 @@
     </div>
     
     <script src="js/app.js"></script>
+    <script src="js/aggregate.js"></script>
 </body>
 </html>

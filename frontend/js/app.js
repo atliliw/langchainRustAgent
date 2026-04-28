@@ -117,7 +117,24 @@ async function compareSearch() {
 
 function renderResults(results) {
     if (results.length === 0) return '<p style="color: #a2a2a2;">无结果</p>';
-    return results.map(r => `<div class="result-item"><span class="score">${(r.score * 100).toFixed(1)}%</span><div class="content">${escapeHtml(r.content.substring(0, 150))}${r.content.length > 150 ? '...' : ''}</div></div>`).join('');
+    return results.map((r, idx) => {
+        const source = r.source || 'unknown';
+        const isBM25 = source === 'bm25';
+        const scoreDisplay = isBM25 ? r.score.toFixed(2) : (r.score * 100).toFixed(1) + '%';
+        const idDisplay = r.id ? `<span style="font-size:11px;color:#64748b;">ID: ${r.id.substring(0, 12)}...</span>` : '';
+        const metaInfo = r.metadata && r.metadata.parent_id ? `<span style="font-size:11px;color:#64748b;">Parent: ${r.metadata.parent_id.substring(0, 12)}...</span>` : '';
+        const mergedInfo = r.metadata && r.metadata.is_merged ? '<span style="font-size:11px;color:#059669;">[merged]</span>' : '';
+        return `<div class="result-item" style="padding:16px;margin-bottom:12px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                <span style="font-size:12px;color:#64748b;">#${idx + 1}</span>
+                <span class="score" style="font-weight:600;">${scoreDisplay}</span>
+            </div>
+            <div style="display:flex;gap:12px;margin-bottom:8px;font-size:11px;color:#64748b;">
+                ${idDisplay} ${metaInfo} ${mergedInfo}
+            </div>
+            <div class="content" style="color:#1e293b;line-height:1.6;">${escapeHtml(r.content.substring(0, 200))}${r.content.length > 200 ? '...' : ''}</div>
+        </div>`;
+    }).join('');
 }
 
 async function clearAll() {
@@ -241,10 +258,40 @@ function setupSearchModeHandlers() {
     const useBM25 = document.getElementById('use-bm25');
     const useHybrid = document.getElementById('use-hybrid');
     const useNone = document.getElementById('use-none');
-    useVector.addEventListener('change', function() { if (this.checked) { useNone.checked = false; if (useBM25.checked) useHybrid.checked = true; } else useHybrid.checked = false; });
-    useBM25.addEventListener('change', function() { if (this.checked) { useNone.checked = false; if (useVector.checked) useHybrid.checked = true; } else useHybrid.checked = false; });
-    useHybrid.addEventListener('change', function() { if (this.checked) { useNone.checked = false; useVector.checked = true; useBM25.checked = true; } });
-    useNone.addEventListener('change', function() { if (this.checked) { useVector.checked = false; useBM25.checked = false; useHybrid.checked = false; } });
+    
+    useVector.addEventListener('change', function() {
+        if (this.checked) {
+            useNone.checked = false;
+        }
+        updateHybridState();
+    });
+    
+    useBM25.addEventListener('change', function() {
+        if (this.checked) {
+            useNone.checked = false;
+        }
+        updateHybridState();
+    });
+    
+    useHybrid.addEventListener('change', function() {
+        if (this.checked) {
+            useNone.checked = false;
+            useVector.checked = true;
+            useBM25.checked = true;
+        }
+    });
+    
+    useNone.addEventListener('change', function() {
+        if (this.checked) {
+            useVector.checked = false;
+            useBM25.checked = false;
+            useHybrid.checked = false;
+        }
+    });
+    
+    function updateHybridState() {
+        useHybrid.checked = useVector.checked && useBM25.checked;
+    }
 }
 
 function updateCompressHint() {

@@ -79,9 +79,18 @@ impl BM25Store {
 
         let search_results: Vec<BM25SearchResult> = results
             .into_iter()
-            .map(|r| {
+            .enumerate()
+            .map(|(idx, r)| {
                 let is_merged = r.is_merged();
+                let chunk_id = if is_merged {
+                    r.parent_id.clone()
+                } else if r.leaf_chunks.len() > 0 {
+                    r.leaf_chunks[0].chunk_id.clone()
+                } else {
+                    format!("bm25_{}", idx)
+                };
                 BM25SearchResult {
+                    id: chunk_id,
                     content: r.content(),
                     score: r.score,
                     parent_id: r.parent_id,

@@ -110,11 +110,14 @@ impl ApiService {
         
         let items: Vec<SearchResultItem> = results.into_iter()
             .map(|r| SearchResultItem {
-                id: Some(r.parent_id.clone()),
+                id: Some(r.id.clone()),
                 content: r.content.clone(),
                 score: r.score,
                 source: Some("bm25".to_string()),
-                metadata: serde_json::json!({"is_merged": r.is_merged}),
+                metadata: serde_json::json!({
+                    "parent_id": r.parent_id,
+                    "is_merged": r.is_merged,
+                }),
             })
             .collect();
         
@@ -167,11 +170,14 @@ impl ApiService {
         
         let bm25_items: Vec<SearchResultItem> = bm25_results.into_iter()
             .map(|r| SearchResultItem {
-                id: Some(r.parent_id.clone()),
+                id: Some(r.id.clone()),
                 content: r.content.clone(),
                 score: r.score,
                 source: Some("bm25".to_string()),
-                metadata: serde_json::Value::Null,
+                metadata: serde_json::json!({
+                    "parent_id": r.parent_id,
+                    "is_merged": r.is_merged,
+                }),
             })
             .collect();
         

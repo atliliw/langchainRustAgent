@@ -5,6 +5,7 @@ pub mod document;
 pub mod langgraph;
 pub mod test;
 pub mod error;
+pub mod aggregate;
 
 pub use error::ApiErrorResponse;
 pub use upload::AppState;

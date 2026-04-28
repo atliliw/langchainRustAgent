@@ -1,6 +1,6 @@
 //! 路由模块（前后端分离架构）
 
-use crate::handlers::{chat, document, langgraph, search, test, upload, AppState};
+use crate::handlers::{aggregate, chat, document, langgraph, search, test, upload, AppState};
 use axum::Router;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -72,6 +72,16 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/documents/:parent_id",
             axum::routing::post(document::delete_document),
         )
+        .route(
+            "/api/aggregate/collect",
+            axum::routing::post(aggregate::collect),
+        )
+        .route("/api/aggregate/list", axum::routing::get(aggregate::list))
+        .route(
+            "/api/aggregate/search",
+            axum::routing::post(aggregate::search),
+        )
+        .route("/api/aggregate/stats", axum::routing::get(aggregate::stats))
         .layer(cors)
         .with_state(state)
 }

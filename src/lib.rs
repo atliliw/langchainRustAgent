@@ -1,4 +1,4 @@
-//! LangChainRust Agent - RAG 对话系统
+//! LangChainRust Agent - RAG 对话系统 + AI信息聚合
 //!
 //! 模块结构：
 //! - config: 配置管理
@@ -8,6 +8,7 @@
 //! - services: 业务逻辑
 //! - handlers: HTTP 处理函数
 //! - routes: 路由定义
+//! - agents: 数据采集Agent
 //! - utils: 工具函数
 
 pub mod config;
@@ -17,4 +18,5 @@ pub mod stores;
 pub mod services;
 pub mod handlers;
 pub mod routes;
+pub mod agents;
 pub mod utils;

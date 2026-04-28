@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BM25SearchResult {
+    pub id: String,
     pub content: String,
     pub score: f32,
     pub parent_id: String,
