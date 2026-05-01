@@ -37,6 +37,12 @@ logs/
 # Deployment package (contains sensitive config and binaries)
 deploy_package/
 
+# Local dependencies (pulled from GitHub instead)
+/crates/
+
+# Docs (local study notes, not for publishing)
+/docs/
+
 # Internal research docs (not for publishing)
 /internal/
 

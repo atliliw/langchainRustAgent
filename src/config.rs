@@ -372,6 +372,7 @@ mod tests {
                 file_output: false,
                 log_file: "test.log".to_string(),
             },
+            conversation: None,
         };
 
         assert_eq!(config.server_addr(), "0.0.0.0:8080");
