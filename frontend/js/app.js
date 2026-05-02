@@ -486,42 +486,33 @@ function updateTotalTokens() {
     fetch(`${API_BASE}/chat/history/${currentSessionId}`).then(function(r){return r.json();}).then(function(msgs){
         var total = 0;
         msgs.forEach(function(m){ if(m.tokens) total += m.tokens; });
-        document.getElementById('session-id-display').innerHTML = '💰 ' + total + ' tokens  |  🆔 ' + currentSessionId;
+        document.getElementById('compress-hint').innerHTML = '💰 ' + total + ' tokens';
     }).catch(function(){});
 }
 
 function updateSessionDisplay(sid) {
     if (!sid) return;
-    window._currentSessionId = sid;
-    document.getElementById('session-copy-btn').style.display = 'inline-block';
     document.getElementById('session-id-display').innerHTML = '🆔 ' + sid;
+    document.getElementById('session-copy-btn').style.display = 'inline-block';
+    window._currentSessionId = sid;
     setTimeout(function() { updateTotalTokens(); }, 300);
 }
 
-function updateSessionDisplay(sid) {
-    if (!sid) return;
-    document.getElementById('session-id-display').innerHTML = '🆔 ' + sid;
-    document.getElementById('session-copy-btn').style.display = 'inline-block';
-    window._currentSessionId = sid;
-}
-
 function copyCurrentSessionId() {
-    if (window._currentSessionId) {
-        // 创建临时输入框，选中复制（兼容所有浏览器，不需要 HTTPS）
-        var input = document.createElement('input');
-        input.value = window._currentSessionId;
-        input.style.position = 'fixed';
-        input.style.opacity = '0';
-        document.body.appendChild(input);
-        input.select();
-        try {
-            document.execCommand('copy');
-            showToast('✅ Session ID 已复制');
-        } catch (e) {
-            prompt('手动复制 Session ID:', window._currentSessionId);
-        }
-        document.body.removeChild(input);
+    if (!window._currentSessionId) return;
+    var input = document.createElement('input');
+    input.value = window._currentSessionId;
+    input.style.position = 'fixed';
+    input.style.opacity = '0';
+    document.body.appendChild(input);
+    input.select();
+    try {
+        document.execCommand('copy');
+        showToast('✅ Session ID 已复制');
+    } catch (e) {
+        prompt('手动复制 Session ID:', window._currentSessionId);
     }
+    document.body.removeChild(input);
 }
 
 async function newSession() {
@@ -530,6 +521,7 @@ async function newSession() {
     document.getElementById('chat-messages').innerHTML = '<div style="text-align: center; color: #a2a2a2; padding: 40px;"><p>开始新对话</p></div>';
     document.getElementById('session-id-display').innerHTML = '💬 待创建';
     document.getElementById('session-copy-btn').style.display = 'none';
+    document.getElementById('compress-hint').innerHTML = '';
     loadSessions();
 }
 
@@ -773,22 +765,13 @@ function setupSearchModeHandlers() {
 }
 
 function updateCompressHint() {
-    const mode = document.getElementById('compress-mode').value;
-    const hints = {
-        'none': '保留完整历史，可能超出token限制',
-        'sliding_window': '只保留最近N条消息',
-        'token_limit': '控制总token数量，超出的压缩',
-        'summary': '将旧消息压缩成摘要',
-        'layered': '保护重要信息 + 摘要 + 最近消息（推荐）'
-    };
-    document.getElementById('compress-hint').textContent = hints[mode] || '';
+    // token显示在compress-hint中，由updateTotalTokens控制
 }
 
 function updateCompressUI() {
     const mode = document.getElementById('compress-mode').value;
     document.getElementById('compress-count-wrap').style.display = 
         (mode === 'sliding_window') ? 'inline' : 'none';
-    updateCompressHint();
 }
 
 function updateCompressExp() {
