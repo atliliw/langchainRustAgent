@@ -1,5 +1,8 @@
-use thiserror::Error;
+//! API 业务错误
+//! 把下层（存储、搜索等）的错误统一包装成 ApiError
+//! 这样上层只需要处理一种错误类型
 
+use thiserror::Error;
 use crate::errors::{BM25Error, ConversationError, HybridError, ProcessError, StoreError};
 
 #[derive(Error, Debug)]
@@ -19,9 +22,9 @@ pub enum ApiError {
     #[error("混合检索失败: {0}")]
     HybridError(#[from] HybridError),
 
-    #[error("处理失败: {0}")]
-    ProcessError(#[from] ProcessError),
-
-    #[error("对话失败: {0}")]
+    #[error("对话处理失败: {0}")]
     ConversationError(#[from] ConversationError),
+
+    #[error("文档处理失败: {0}")]
+    ProcessError(#[from] ProcessError),
 }

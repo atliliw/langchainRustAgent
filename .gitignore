@@ -34,6 +34,9 @@ logs/
 *.bak
 *.tar
 
+# Build error logs
+errors.txt
+
 # Deployment package (contains sensitive config and binaries)
 deploy_package/
 

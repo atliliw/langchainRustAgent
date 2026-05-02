@@ -1,4 +1,7 @@
-//! 聚合内容存储模块
+//! Agent 采集内容存储模块
+//!
+//! 存储从 GitHub/HackerNews/RSS/ArXiv 采集的信息。
+//! 使用 SQLite 持久化，支持按来源查询、关键词搜索、统计分析
 
 use crate::config::Config;
 use crate::errors::AgentError;
@@ -16,31 +19,28 @@ pub struct ContentStore {
 }
 
 impl ContentStore {
+    /// 初始化：连接 SQLite + 建表
     pub async fn new(config: &Config) -> Result<Self, AgentError> {
         let db_path = "aggregate_content.db";
         
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect(&format!("sqlite:{}?mode=rwc", db_path))
-            .await
-            .map_err(|e| AgentError::NetworkError(e.to_string()))?;
+            .await?;
         
         Self::create_tables(&pool).await?;
         
         let embeddings_config = config.to_langchain_embeddings_config();
         let embeddings = Arc::new(OpenAIEmbeddings::new(embeddings_config));
         
-        Ok(Self {
-            pool,
-            embeddings,
-        })
+        Ok(Self { pool, embeddings })
     }
     
     async fn create_tables(pool: &SqlitePool) -> Result<(), AgentError> {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS aggregate_content (
                 id TEXT PRIMARY KEY,
-                source TEXT NOT NULL,
+                source TEXT NOT NULL,       -- github/hackernews/rss/arxiv
                 title TEXT NOT NULL,
                 content TEXT NOT NULL,
                 url TEXT NOT NULL,
@@ -49,59 +49,17 @@ impl ContentStore {
                 collected_at INTEGER NOT NULL,
                 summary TEXT,
                 keywords TEXT,
-                metadata TEXT
+                metadata TEXT               -- JSON 字符串
             )"
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| AgentError::NetworkError(e.to_string()))?;
+        ).execute(pool).await?;
         
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_content_source ON aggregate_content(source)")
-            .execute(pool)
-            .await
-            .map_err(|e| AgentError::NetworkError(e.to_string()))?;
-        
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_content_collected ON aggregate_content(collected_at)")
-            .execute(pool)
-            .await
-            .map_err(|e| AgentError::NetworkError(e.to_string()))?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_content_source ON aggregate_content(source)").execute(pool).await.ok();
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_content_collected ON aggregate_content(collected_at)").execute(pool).await.ok();
         
         Ok(())
     }
     
-    pub async fn save_items(&self, items: Vec<CollectedItem>) -> Result<usize, AgentError> {
-        let mut count = 0;
-        
-        for item in items {
-            let keywords_json = serde_json::to_string(&Vec::<String>::new()).unwrap();
-            let metadata_json = serde_json::to_string(&item.metadata).unwrap();
-            
-            sqlx::query(
-                "INSERT OR IGNORE INTO aggregate_content 
-                (id, source, title, content, url, author, published_at, collected_at, summary, keywords, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            )
-            .bind(&item.id)
-            .bind(item.source.as_str())
-            .bind(&item.title)
-            .bind(&item.content)
-            .bind(&item.url)
-            .bind(&item.author)
-            .bind(item.published_at)
-            .bind(Utc::now().timestamp_millis())
-            .bind(None::<String>)
-            .bind(&keywords_json)
-            .bind(&metadata_json)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| AgentError::NetworkError(e.to_string()))?;
-            
-            count += 1;
-        }
-        
-        Ok(count)
-    }
-    
+    /// 保存单条采集内容（带 LLM 生成的摘要）
     pub async fn save_item_with_summary(&self, item: CollectedItem, summary: &str) -> Result<(), AgentError> {
         let keywords_json = serde_json::to_string(&Vec::<String>::new()).unwrap();
         let metadata_json = serde_json::to_string(&item.metadata).unwrap();
@@ -122,56 +80,34 @@ impl ContentStore {
         .bind(summary)
         .bind(&keywords_json)
         .bind(&metadata_json)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| AgentError::NetworkError(e.to_string()))?;
+        .execute(&self.pool).await?;
         
         Ok(())
     }
     
+    /// 列表查询（支持按来源过滤和分页）
     pub async fn list(&self, source: Option<&str>, limit: usize, offset: usize) -> Result<(usize, Vec<AggregatedContent>), AgentError> {
-        let total_query = if let Some(s) = source {
-            sqlx::query("SELECT COUNT(*) FROM aggregate_content WHERE source = ?")
-                .bind(s)
+        // 先查总数
+        let total: usize = if let Some(s) = source {
+            sqlx::query("SELECT COUNT(*) FROM aggregate_content WHERE source = ?").bind(s)
         } else {
             sqlx::query("SELECT COUNT(*) FROM aggregate_content")
-        };
+        }.fetch_one(&self.pool).await?.get::<i64, _>(0) as usize;
         
-        let total: usize = total_query
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| AgentError::NetworkError(e.to_string()))?
-            .get::<i64, _>(0) as usize;
-        
-        let items_query = if let Some(s) = source {
+        // 查数据
+        let rows = if let Some(s) = source {
             sqlx::query(
                 "SELECT id, source, title, content, url, author, published_at, collected_at, summary, keywords, metadata
                 FROM aggregate_content WHERE source = ? ORDER BY collected_at DESC LIMIT ? OFFSET ?"
-            )
-            .bind(s)
-            .bind(limit as i64)
-            .bind(offset as i64)
+            ).bind(s).bind(limit as i64).bind(offset as i64)
         } else {
             sqlx::query(
                 "SELECT id, source, title, content, url, author, published_at, collected_at, summary, keywords, metadata
                 FROM aggregate_content ORDER BY collected_at DESC LIMIT ? OFFSET ?"
-            )
-            .bind(limit as i64)
-            .bind(offset as i64)
-        };
-        
-        let rows = items_query
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| AgentError::NetworkError(e.to_string()))?;
+            ).bind(limit as i64).bind(offset as i64)
+        }.fetch_all(&self.pool).await?;
         
         let items: Vec<AggregatedContent> = rows.into_iter().map(|row| {
-            let keywords_json: String = row.get::<String, _>(9);
-            let metadata_json: String = row.get::<String, _>(10);
-            
-            let keywords: Vec<String> = serde_json::from_str(&keywords_json).unwrap_or_default();
-            let metadata: HashMap<String, serde_json::Value> = serde_json::from_str(&metadata_json).unwrap_or_default();
-            
             AggregatedContent {
                 id: row.get::<String, _>(0),
                 source: row.get::<String, _>(1),
@@ -182,17 +118,19 @@ impl ContentStore {
                 published_at: row.get::<Option<i64>, _>(6),
                 collected_at: row.get::<i64, _>(7),
                 summary: row.get::<Option<String>, _>(8),
-                keywords,
-                metadata,
+                keywords: serde_json::from_str(&row.get::<String, _>(9)).unwrap_or_default(),
+                metadata: serde_json::from_str(&row.get::<String, _>(10)).unwrap_or_default(),
             }
         }).collect();
         
         Ok((total, items))
     }
     
+    /// 简单关键词搜索（基于词匹配分数）
     pub async fn search(&self, query: &str, top_k: usize) -> Result<Vec<AggregateSearchResult>, AgentError> {
         let all_items = self.list(None, 100, 0).await?.1;
         
+        // 计算每条内容与查询词的匹配度（简单版：单词重叠比例）
         let mut scored: Vec<(f32, AggregatedContent)> = all_items.into_iter()
             .map(|item| {
                 let text = format!("{} {}", item.title, item.content);
@@ -219,6 +157,7 @@ impl ContentStore {
         Ok(results)
     }
     
+    // 简单的词重叠匹配（不以 Embedding，节省成本）
     fn simple_similarity(query: &str, text: &str) -> f32 {
         let query_words: Vec<&str> = query.split_whitespace().collect();
         let text_words: Vec<&str> = text.split_whitespace().collect();
@@ -227,46 +166,26 @@ impl ContentStore {
             .filter(|w| text_words.iter().any(|t| t.contains(*w)))
             .count();
         
-        if query_words.is_empty() {
-            0.0
-        } else {
-            matches as f32 / query_words.len() as f32
-        }
+        if query_words.is_empty() { 0.0 } else { matches as f32 / query_words.len() as f32 }
     }
     
+    /// 统计（总量、按来源分布、最后采集时间）
     pub async fn stats(&self) -> Result<(usize, HashMap<String, usize>, Option<i64>), AgentError> {
         let total: usize = sqlx::query("SELECT COUNT(*) FROM aggregate_content")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| AgentError::NetworkError(e.to_string()))?
+            .fetch_one(&self.pool).await?
             .get::<i64, _>(0) as usize;
         
         let rows = sqlx::query("SELECT source, COUNT(*) FROM aggregate_content GROUP BY source")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| AgentError::NetworkError(e.to_string()))?;
+            .fetch_all(&self.pool).await?;
         
         let by_source: HashMap<String, usize> = rows.into_iter()
             .map(|row| (row.get::<String, _>(0), row.get::<i64, _>(1) as usize))
             .collect();
         
         let last: Option<i64> = sqlx::query("SELECT MAX(collected_at) FROM aggregate_content")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| AgentError::NetworkError(e.to_string()))?
+            .fetch_one(&self.pool).await?
             .get::<Option<i64>, _>(0);
         
         Ok((total, by_source, last))
-    }
-    
-    pub async fn update_summary(&self, id: &str, summary: &str) -> Result<(), AgentError> {
-        sqlx::query("UPDATE aggregate_content SET summary = ? WHERE id = ?")
-            .bind(summary)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| AgentError::NetworkError(e.to_string()))?;
-        
-        Ok(())
     }
 }

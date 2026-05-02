@@ -1,4 +1,9 @@
 //! 搜索精准度测试模块
+//!
+//! 测试向量检索的效果：
+//! 1. 插入几条已知的测试文档
+//! 2. 用对应的搜索词去搜索
+//! 3. 看能不能找到预期的结果
 
 use crate::config::Config;
 use crate::stores::QdrantStore;
@@ -18,6 +23,7 @@ impl SearchTester {
         Self { store, config }
     }
     
+    /// 获取默认测试用例（5条，涵盖日期、功能、定义等场景）
     pub fn get_default_test_cases() -> Vec<TestCase> {
         vec![
             TestCase {
@@ -53,6 +59,7 @@ impl SearchTester {
         ]
     }
     
+    /// 把测试文档插入 Qdrant
     pub async fn init_test_data(&self, test_cases: &[TestCase]) -> Result<(), TestError> {
         let documents: Vec<Document> = test_cases.iter()
             .enumerate()
@@ -69,6 +76,7 @@ impl SearchTester {
         Ok(())
     }
     
+    /// 运行全部测试用例，生成测试报告
     pub async fn run_precision_test(&self, test_cases: Vec<TestCase>) -> Result<PrecisionReport, TestError> {
         self.init_test_data(&test_cases).await?;
         
@@ -77,6 +85,7 @@ impl SearchTester {
         let mut total_position = 0.0;
         
         for tc in &test_cases {
+            // 搜索
             let search_results = self.store.search(&tc.query, tc.expected_in_top_k + 2).await
                 .map_err(|e| TestError::SearchError(e.to_string()))?;
             
@@ -84,6 +93,7 @@ impl SearchTester {
             let mut position = None;
             let mut score = None;
             
+            // 检查预期的文档是否在结果中
             for (idx, result) in search_results.iter().enumerate() {
                 if result.document.content.contains(&tc.document) 
                     || result.document.id.as_ref().map(|id| id.starts_with("test_")).unwrap_or(false) {
@@ -95,13 +105,9 @@ impl SearchTester {
             }
             
             let passed = found && position.unwrap_or(999) <= tc.expected_in_top_k;
-            if passed {
-                passed_count += 1;
-            }
+            if passed { passed_count += 1; }
             
-            if let Some(pos) = position {
-                total_position += pos as f32;
-            }
+            if let Some(pos) = position { total_position += pos as f32; }
             
             results.push(TestResult {
                 test_case: tc.clone(),
@@ -113,11 +119,7 @@ impl SearchTester {
         }
         
         let precision_score = passed_count as f32 / test_cases.len() as f32;
-        let avg_position = if passed_count > 0 {
-            total_position / passed_count as f32
-        } else {
-            0.0
-        };
+        let avg_position = if passed_count > 0 { total_position / passed_count as f32 } else { 0.0 };
         
         Ok(PrecisionReport {
             total_tests: test_cases.len(),
@@ -128,6 +130,7 @@ impl SearchTester {
         })
     }
     
+    /// 清理测试数据
     pub async fn clear_test_data(&self) -> Result<(), TestError> {
         self.store.clear().await
             .map_err(|e| TestError::InitError(e.to_string()))?;

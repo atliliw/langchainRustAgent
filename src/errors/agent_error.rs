@@ -15,4 +15,13 @@ pub enum AgentError {
 
     #[error("LLM处理失败: {0}")]
     LLMError(String),
+
+    #[error("数据库错误: {0}")]
+    DatabaseError(String),
+}
+
+impl From<sqlx::Error> for AgentError {
+    fn from(e: sqlx::Error) -> Self {
+        AgentError::DatabaseError(e.to_string())
+    }
 }

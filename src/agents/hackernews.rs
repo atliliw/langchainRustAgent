@@ -1,4 +1,7 @@
 //! Hacker News 采集工具
+//!
+//! 调用 HN Algolia Search API，搜索 AI/Agent/LLM 相关的热门讨论
+//! API: GET /api/v1/search?query={keyword}&tags=story
 
 use crate::agents::{ContentSource, CollectedItem};
 use crate::errors::AgentError;
@@ -30,23 +33,20 @@ impl HackerNewsTool {
         }
     }
     
+    /// 搜索热门故事（按关键词）
     pub async fn fetch_top_stories(&self, keywords: &[&str]) -> Result<Vec<CollectedItem>, AgentError> {
         let mut items = Vec::new();
-        
         for keyword in keywords {
             let stories = self.search_stories(keyword).await?;
             for story in stories {
                 let url = story.url.clone().unwrap_or_else(|| {
                     format!("https://news.ycombinator.com/item?id={}", story.objectID)
                 });
-                
                 let item = CollectedItem {
                     id: Uuid::new_v4().to_string(),
                     source: ContentSource::HackerNews,
                     title: story.title.clone(),
-                    content: format!("Points: {}, Comments: {}", 
-                        story.points, 
-                        story.num_comments.unwrap_or(0)),
+                    content: format!("Points: {}, Comments: {}", story.points, story.num_comments.unwrap_or(0)),
                     url,
                     author: story.author.clone(),
                     published_at: Some(story.created_at_i),
@@ -59,35 +59,20 @@ impl HackerNewsTool {
                 items.push(item);
             }
         }
-        
         Ok(items)
     }
     
     async fn search_stories(&self, keyword: &str) -> Result<Vec<HNStory>, AgentError> {
-        let url = format!(
-            "{}{}",
-            self.api_base,
-            format!(
-                "/search?query={}&tags=story&hitsPerPage=20",
-                keyword
-            )
-        );
-        
-        let response = self.client
-            .get(&url)
-            .send()
-            .await
+        let url = format!("{}/search?query={}&tags=story&hitsPerPage=20", self.api_base, keyword);
+        let response = self.client.get(&url).send().await
             .map_err(|e| AgentError::NetworkError(e.to_string()))?;
         
         if !response.status().is_success() {
             return Err(AgentError::ApiError(format!("HN API返回: {}", response.status())));
         }
         
-        let body: HNSearchResponse = response
-            .json()
-            .await
+        let body: HNSearchResponse = response.json().await
             .map_err(|e| AgentError::ParseError(e.to_string()))?;
-        
         Ok(body.hits)
     }
 }
@@ -98,7 +83,5 @@ struct HNSearchResponse {
 }
 
 impl Default for HackerNewsTool {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }

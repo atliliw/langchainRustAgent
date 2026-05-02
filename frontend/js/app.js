@@ -9,14 +9,12 @@ async function fetchStats() {
     try {
         const res = await fetch(`${API_BASE}/stats`);
         const data = await res.json();
-        document.getElementById('stats-loading').classList.add('hidden');
-        document.getElementById('stats-content').classList.remove('hidden');
         document.getElementById('total-docs').textContent = data.total_documents;
         document.getElementById('vector-size').textContent = data.vector_size;
         document.getElementById('bm25-chunks').textContent = data.bm25_chunks;
         document.getElementById('sessions-count').textContent = data.conversation_sessions || 0;
     } catch (e) {
-        document.getElementById('stats-loading').innerHTML = `<div class="error">加载失败: ${e.message}</div>`;
+        // 静默处理
     }
 }
 
@@ -427,9 +425,11 @@ async function loadSessions() {
         sessions.forEach(s => {
             const isActive = s.session_id === currentSessionId;
             const title = s.title || s.preview || '新对话';
+            const shortId = s.session_id.substring(0, 8) + '...';
             html += `<div class="session-item ${isActive ? 'active' : ''}" onclick="loadSession('${s.session_id}')">
                 <div class="session-title">${escapeHtml(title)}</div>
                 <div class="time">${formatTime(s.created_at)} (${s.message_count}条)</div>
+                <div style="font-size:10px;color:#94a3b8;font-family:monospace;margin-top:2px;">ID: ${shortId}</div>
             </div>`;
         });
         document.getElementById('session-list').innerHTML = html || '<div style="color: #a2a2a2; font-size: 12px;">暂无历史会话</div>';
@@ -449,15 +449,21 @@ async function loadAllSessions() {
 
 async function loadSession(sessionId) {
     currentSessionId = sessionId;
+    updateSessionDisplay(sessionId);
     try {
         const res = await fetch(`${API_BASE}/chat/history/${sessionId}`);
         const messages = await res.json();
-        let html = '<div style="margin-bottom:10px;display:flex;gap:10px;">';
+        // 计算本次对话的总 token
+        var totalTokens = 0;
+        messages.forEach(function(m) { if (m.tokens) totalTokens += m.tokens; });
+        let html = '<div style="margin-bottom:10px;display:flex;gap:10px;align-items:center;">';
         html += `<button class="btn btn-small" onclick="exportSession('${sessionId}')">📤 导出会话</button>`;
+        html += `<span style="margin-left:auto;font-size:12px;color:#64748b;">总消耗: <strong style="color:#1e40af;">${totalTokens}</strong> tokens</span>`;
         html += '</div>';
         messages.forEach(m => {
             const roleClass = m.role === 'user' ? 'user' : 'assistant';
             const msgId = m.id;
+            const tokenBadge = m.tokens ? `<span style="background:#e2e8f0;color:#64748b;border-radius:4px;padding:1px 6px;font-size:10px;margin-left:8px;">${m.tokens}t</span>` : '';
             html += `<div class="message ${roleClass}" data-msg-id="${msgId}">
                 <div class="message-content">${escapeHtml(m.content)}</div>
                 <div class="message-actions">
@@ -467,7 +473,7 @@ async function loadSession(sessionId) {
                     <button class="msg-btn branch-btn" onclick="branchSession('${sessionId}', '${msgId}')">🌿</button>
                     <button class="msg-btn delete-btn" onclick="deleteMessageUI('${msgId}')">🗑️</button>
                 </div>
-                <div class="time">${formatTime(m.time_created)}</div>
+                <div class="time">${formatTime(m.time_created)}${tokenBadge}</div>
             </div>`;
         });
         document.getElementById('chat-messages').innerHTML = html || '<div style="text-align: center; color: #a2a2a2; padding: 40px;">空会话</div>';
@@ -475,10 +481,55 @@ async function loadSession(sessionId) {
     } catch (e) { document.getElementById('chat-messages').innerHTML = `<div class="error">加载失败: ${e.message}</div>`; }
 }
 
+function updateTotalTokens() {
+    if (!currentSessionId) return;
+    fetch(`${API_BASE}/chat/history/${currentSessionId}`).then(function(r){return r.json();}).then(function(msgs){
+        var total = 0;
+        msgs.forEach(function(m){ if(m.tokens) total += m.tokens; });
+        document.getElementById('session-id-display').innerHTML = '💰 ' + total + ' tokens  |  🆔 ' + currentSessionId;
+    }).catch(function(){});
+}
+
+function updateSessionDisplay(sid) {
+    if (!sid) return;
+    window._currentSessionId = sid;
+    document.getElementById('session-copy-btn').style.display = 'inline-block';
+    document.getElementById('session-id-display').innerHTML = '🆔 ' + sid;
+    setTimeout(function() { updateTotalTokens(); }, 300);
+}
+
+function updateSessionDisplay(sid) {
+    if (!sid) return;
+    document.getElementById('session-id-display').innerHTML = '🆔 ' + sid;
+    document.getElementById('session-copy-btn').style.display = 'inline-block';
+    window._currentSessionId = sid;
+}
+
+function copyCurrentSessionId() {
+    if (window._currentSessionId) {
+        // 创建临时输入框，选中复制（兼容所有浏览器，不需要 HTTPS）
+        var input = document.createElement('input');
+        input.value = window._currentSessionId;
+        input.style.position = 'fixed';
+        input.style.opacity = '0';
+        document.body.appendChild(input);
+        input.select();
+        try {
+            document.execCommand('copy');
+            showToast('✅ Session ID 已复制');
+        } catch (e) {
+            prompt('手动复制 Session ID:', window._currentSessionId);
+        }
+        document.body.removeChild(input);
+    }
+}
+
 async function newSession() {
     currentSessionId = null;
     localStorage.removeItem('chat_session_id');
     document.getElementById('chat-messages').innerHTML = '<div style="text-align: center; color: #a2a2a2; padding: 40px;"><p>开始新对话</p></div>';
+    document.getElementById('session-id-display').innerHTML = '💬 待创建';
+    document.getElementById('session-copy-btn').style.display = 'none';
     loadSessions();
 }
 
@@ -491,6 +542,11 @@ async function sendMessage() {
     const useHybrid = document.getElementById('use-hybrid').checked;
     const useNone = document.getElementById('use-none').checked;
     const compressMode = document.getElementById('compress-mode').value;
+    const compressCount = document.getElementById('compress-count').value;
+    // 如果是滑动窗口且设置了数量，传 "sliding_window_10" 格式
+    const finalCompressMode = (compressMode === 'sliding_window' && compressCount) 
+        ? 'sliding_window_' + compressCount 
+        : compressMode;
     const topK = parseInt(document.getElementById('rag-top-k').value) || 5;
     input.value = ''; input.disabled = true; document.getElementById('send-btn').disabled = true;
     const messagesDiv = document.getElementById('chat-messages');
@@ -503,17 +559,17 @@ async function sendMessage() {
     let fullReply = ''; let sessionId = currentSessionId; let sourcesCount = 0;
     displayedText = ''; window.typewriterQueue = ''; window.typewriterRunning = false; window.typewriterDone = false;
     try {
-        const response = await fetch(`${API_BASE}/chat/stream`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ session_id: currentSessionId, message: message, use_vector: useNone ? false : (useHybrid ? true : useVector), use_bm25: useNone ? false : (useHybrid ? true : useBM25), top_k: topK, compress_mode: compressMode }) });
+        const response = await fetch(`${API_BASE}/chat/stream`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ session_id: currentSessionId, message: message, use_vector: useNone ? false : (useHybrid ? true : useVector), use_bm25: useNone ? false : (useHybrid ? true : useBM25), top_k: topK, compress_mode: finalCompressMode }) });
         const reader = response.body.getReader(); const decoder = new TextDecoder(); let currentEvent = '';
         while (true) { const { done, value } = await reader.read(); if (done) break; const chunk = decoder.decode(value); const lines = chunk.split('\n');
             for (let i = 0; i < lines.length; i++) { const line = lines[i];
                 if (line.startsWith('event:')) { currentEvent = line.slice(6).trim(); continue; }
                 if (line.startsWith('data:')) { const data = line.slice(5);
-                    if (currentEvent === 'session') { sessionId = data.trim(); currentEvent = ''; }
+                    if (currentEvent === 'session') { sessionId = data.trim(); updateSessionDisplay(sessionId); currentEvent = ''; }
                     else if (currentEvent === 'mode') { currentEvent = ''; }
                     else if (currentEvent === 'token') { fullReply += data; if (!window.typewriterQueue) window.typewriterQueue = ''; window.typewriterQueue += data; if (!window.typewriterRunning) { window.typewriterRunning = true; typeWriterEffect(assistantDiv, messagesDiv); } currentEvent = ''; }
-                    else if (currentEvent === 'done' || data === '[DONE]') { localStorage.setItem('chat_session_id', sessionId); currentSessionId = sessionId; window.typewriterQueue = ''; window.typewriterDone = true;
-                        setTimeout(() => { window.typewriterRunning = false; window.typewriterDone = false; assistantDiv.innerHTML = `<div>${escapeHtml(fullReply)}</div><div class="time">${new Date().toLocaleTimeString()}</div>`; if (sourcesCount > 0) assistantDiv.innerHTML += `<div class="sources">参考文档: ${sourcesCount}条</div>`; messagesDiv.scrollTop = messagesDiv.scrollHeight; loadSessions(); fetchStats(); }, 100); currentEvent = ''; }
+                    else if (currentEvent === 'done' || data === '[DONE]') { if (sessionId) { currentSessionId = sessionId; updateSessionDisplay(sessionId); localStorage.setItem('chat_session_id', sessionId); } window.typewriterQueue = ''; window.typewriterDone = true;
+                        setTimeout(() => { window.typewriterRunning = false; window.typewriterDone = false; var estTokens = Math.ceil(fullReply.length / 4); assistantDiv.innerHTML = `<div>${escapeHtml(fullReply)}</div><div class="time">${new Date().toLocaleTimeString()} <span style="background:#e2e8f0;color:#64748b;border-radius:4px;padding:1px 6px;font-size:10px;margin-left:8px;">~${estTokens}t</span></div>`; if (sourcesCount > 0) assistantDiv.innerHTML += `<div class="sources">参考文档: ${sourcesCount}条</div>`; messagesDiv.scrollTop = messagesDiv.scrollHeight; updateTotalTokens(); loadSessions(); fetchStats(); }, 100); currentEvent = ''; }
                     else if (currentEvent === 'error') { assistantDiv.innerHTML = `<div class="error">${data}</div>`; currentEvent = ''; }
                     else if (data && data !== '[DONE]') { fullReply += data; if (!window.typewriterQueue) window.typewriterQueue = ''; window.typewriterQueue += data; if (!window.typewriterRunning) { window.typewriterRunning = true; typeWriterEffect(assistantDiv, messagesDiv); } }
                 }
@@ -726,6 +782,13 @@ function updateCompressHint() {
         'layered': '保护重要信息 + 摘要 + 最近消息（推荐）'
     };
     document.getElementById('compress-hint').textContent = hints[mode] || '';
+}
+
+function updateCompressUI() {
+    const mode = document.getElementById('compress-mode').value;
+    document.getElementById('compress-count-wrap').style.display = 
+        (mode === 'sliding_window') ? 'inline' : 'none';
+    updateCompressHint();
 }
 
 function updateCompressExp() {

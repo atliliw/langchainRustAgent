@@ -265,8 +265,8 @@ impl ConversationStore {
         }
         
         match mode {
-            CompressMode::SlidingWindow => self.apply_sliding_window(history),
-            CompressMode::TokenLimit => self.apply_token_limit(history),
+            CompressMode::SlidingWindow(n) => self.apply_sliding_window(history, n),
+            CompressMode::TokenLimit(n) => self.apply_token_limit(history, n),
             CompressMode::Summary => self.apply_summary_compression(history).await,
             CompressMode::Layered => self.apply_layered_compression(history).await,
             CompressMode::None => Ok((history, false, None)),
@@ -276,8 +276,9 @@ impl ConversationStore {
     fn apply_sliding_window(
         &self,
         history: Vec<ConversationMessage>,
+        keep_count: Option<usize>,
     ) -> Result<(Vec<ConversationMessage>, bool, Option<String>), ConversationError> {
-        let max_messages = self.compress_config.max_history_messages;
+        let max_messages = keep_count.unwrap_or(self.compress_config.max_history_messages);
         
         if history.len() <= max_messages {
             return Ok((history, false, None));
@@ -292,8 +293,9 @@ impl ConversationStore {
     fn apply_token_limit(
         &self,
         history: Vec<ConversationMessage>,
+        _max_tokens_override: Option<usize>,
     ) -> Result<(Vec<ConversationMessage>, bool, Option<String>), ConversationError> {
-        let max_tokens = self.compress_config.max_tokens;
+        let max_tokens = _max_tokens_override.unwrap_or(self.compress_config.max_tokens);
         let keep_first_n = self.compress_config.keep_first_n_messages;
         let original_len = history.len();
         
@@ -710,6 +712,16 @@ pub struct ApiTypeStats {
     pub call_count: i64,
     pub tokens_used: i64,
     pub avg_duration_ms: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RecentCall {
+    pub id: i64,
+    pub api_type: String,
+    pub tokens_used: i64,
+    pub duration_ms: i64,
+    pub success: bool,
+    pub time_created: String,
 }
 
 pub fn estimate_tokens(text: &str) -> usize {

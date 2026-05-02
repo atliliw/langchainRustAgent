@@ -1,3 +1,5 @@
+//! 文档处理错误定义
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]

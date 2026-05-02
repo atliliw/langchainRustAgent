@@ -1,4 +1,7 @@
 //! RSS 博客订阅采集工具
+//!
+//! 解析 OpenAI、Anthropic 等 AI公司的 RSS/Atom 订阅源
+//! 手动解析 XML（不依赖第三方 RSS 库）
 
 use crate::agents::{ContentSource, CollectedItem};
 use crate::errors::AgentError;
@@ -22,49 +25,41 @@ pub struct RSSTool {
 
 impl RSSTool {
     pub fn new() -> Self {
-        Self {
-            client: Client::new(),
-        }
+        Self { client: Client::new() }
     }
     
+    /// 订阅单个 RSS 源
     pub async fn fetch_feed(&self, feed_url: &str) -> Result<Vec<CollectedItem>, AgentError> {
-        let response = self.client
-            .get(feed_url)
-            .send()
-            .await
+        let response = self.client.get(feed_url).send().await
             .map_err(|e| AgentError::NetworkError(e.to_string()))?;
         
         if !response.status().is_success() {
             return Err(AgentError::ApiError(format!("RSS返回: {}", response.status())));
         }
         
-        let body = response
-            .text()
-            .await
+        let body = response.text().await
             .map_err(|e| AgentError::ParseError(e.to_string()))?;
         
         self.parse_rss(&body)
     }
     
+    /// 批量订阅多个 RSS 源
     pub async fn fetch_all_feeds(&self, feeds: &[&str]) -> Result<Vec<CollectedItem>, AgentError> {
         let mut all_items = Vec::new();
-        
         for feed_url in feeds {
             match self.fetch_feed(feed_url).await {
                 Ok(items) => all_items.extend(items),
                 Err(e) => tracing::warn!("RSS feed {} 失败: {}", feed_url, e),
             }
         }
-        
         Ok(all_items)
     }
     
+    /// 手动解析 RSS XML（提取 <item> 标签）
     fn parse_rss(&self, xml: &str) -> Result<Vec<CollectedItem>, AgentError> {
         let mut items = Vec::new();
-        
         let item_starts: Vec<usize> = xml.match_indices("<item>")
-            .map(|(i, _)| i)
-            .collect();
+            .map(|(i, _)| i).collect();
         
         for start in item_starts {
             if let Some(end) = xml[start..].find("</item>") {
@@ -90,22 +85,19 @@ impl RSSTool {
                         url: link,
                         author,
                         published_at,
-                        metadata: serde_json::json!({
-                            "pub_date": pub_date,
-                        }),
+                        metadata: serde_json::json!({ "pub_date": pub_date }),
                     };
                     items.push(item);
                 }
             }
         }
-        
         Ok(items)
     }
     
+    /// 提取 XML 标签内的文本
     fn extract_tag(&self, xml: &str, tag: &str) -> Option<String> {
         let open = format!("<{}>", tag);
         let close = format!("</{}>", tag);
-        
         if let Some(start) = xml.find(&open) {
             let content_start = start + open.len();
             if let Some(end) = xml[content_start..].find(&close) {
@@ -116,6 +108,7 @@ impl RSSTool {
         None
     }
     
+    /// 清理 HTML 实体
     fn clean_content(&self, content: &str) -> String {
         content
             .replace("&lt;", "<")
@@ -128,7 +121,5 @@ impl RSSTool {
 }
 
 impl Default for RSSTool {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }

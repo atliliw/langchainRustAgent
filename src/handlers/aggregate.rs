@@ -1,4 +1,10 @@
 //! 聚合内容 API 处理函数
+//!
+//! Agent 数据采集相关：
+//!   POST /api/aggregate/collect    从多个数据源采集信息
+//!   GET  /api/aggregate/list       查看已采集的数据
+//!   POST /api/aggregate/search     在采集的数据中搜索
+//!   GET  /api/aggregate/stats      采集统计
 
 use crate::handlers::{AppState, ApiErrorResponse};
 use crate::models::*;
@@ -10,6 +16,10 @@ use axum::{
 };
 use std::sync::Arc;
 
+/// 采集数据
+/// POST /api/aggregate/collect
+/// 从 GitHub、HackerNews、RSS 订阅、ArXiv 论文等渠道抓取最新 AI 相关资讯
+/// sources 参数指定要采集的渠道，不传则全部采集
 pub async fn collect(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CollectRequest>,
@@ -23,6 +33,9 @@ pub async fn collect(
     Ok(AxumJson(response))
 }
 
+/// 查看采集列表
+/// GET /api/aggregate/list
+/// 可选 source 过滤（如 ?source=github），limit/offset 分页
 pub async fn list(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AggregateListQuery>,
@@ -39,6 +52,9 @@ pub async fn list(
     Ok(AxumJson(response))
 }
 
+/// 在采集数据中搜索
+/// POST /api/aggregate/search
+/// 用简单的关键词匹配搜索已采集的文章
 pub async fn search(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AggregateSearchRequest>,
@@ -52,6 +68,9 @@ pub async fn search(
     Ok(AxumJson(response))
 }
 
+/// 获取采集统计
+/// GET /api/aggregate/stats
+/// 返回: 总量、按来源分布、最后一次采集时间
 pub async fn stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<AxumJson<AggregateStatsResponse>, ApiErrorResponse> {

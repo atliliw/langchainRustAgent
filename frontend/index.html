@@ -27,27 +27,11 @@
         </div>
         
         <div class="main-content">
-            <div class="card">
-                <h2>系统状态</h2>
-                <div id="stats-loading" class="loading">正在加载...</div>
-                <div id="stats-content" class="stats hidden">
-                    <div class="stat-item">
-                        <div class="value" id="total-docs">0</div>
-                        <div class="label">文档总数</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="value" id="vector-size">1536</div>
-                        <div class="label">向量维度</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="value" id="bm25-chunks">0</div>
-                        <div class="label">BM25 索引</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="value" id="sessions-count">0</div>
-                        <div class="label">对话会话</div>
-                    </div>
-                </div>
+            <div class="stats-bar" id="stats-content" style="display:flex;gap:10px;padding:6px 12px;background:#f8fafc;border-radius:6px;margin-bottom:10px;font-size:12px;color:#64748b;">
+                <div>📄 文档: <strong id="total-docs" style="color:#1e40af;">0</strong></div>
+                <div>🧬 向量: <strong id="vector-size" style="color:#1e40af;">1536</strong>d</div>
+                <div>🔤 BM25: <strong id="bm25-chunks" style="color:#1e40af;">0</strong></div>
+                <div>💬 会话: <strong id="sessions-count" style="color:#1e40af;">0</strong></div>
             </div>
         
         <div id="upload-tab" class="card">
@@ -131,14 +115,23 @@
                     </div>
                     <div class="chat-options" style="margin-top: 10px; border-top: 1px solid #eee; padding-top: 10px;">
                         <span style="color: #666; font-size: 13px; margin-right: 10px;">对话压缩：</span>
-                        <select id="compress-mode" style="padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
+                        <select id="compress-mode" onchange="updateCompressUI()" style="padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
                             <option value="none">不压缩（完整历史）</option>
-                            <option value="sliding_window">滑动窗口（保留最近N条）</option>
+                            <option value="sliding_window">滑动窗口</option>
                             <option value="token_limit">Token限制（保护关键设定）</option>
                             <option value="summary">摘要压缩（旧消息压缩为摘要）</option>
                             <option value="layered">分层压缩（重要+摘要+最近）</option>
                         </select>
+                        <span id="compress-count-wrap" style="display:none;margin-left:10px;">
+                            <span style="color:#666;font-size:13px;">保留</span>
+                            <input type="number" id="compress-count" value="10" min="1" max="100" style="width:50px;padding:5px;border:1px solid #ddd;border-radius:4px;font-size:13px;">
+                            <span style="color:#666;font-size:13px;">条</span>
+                        </span>
                         <span id="compress-hint" style="color: #999; font-size: 12px; margin-left: 10px;"></span>
+                        <span style="margin-left: auto; display:flex; align-items:center; gap:8px;">
+                            <span id="session-id-display" style="font-size:11px;color:#1e40af;font-family:monospace;font-weight:bold;white-space:nowrap;">💬 待创建</span>
+                            <button id="session-copy-btn" onclick="copyCurrentSessionId()" style="display:none;background:#3b82f6;color:white;border:none;border-radius:4px;font-size:10px;padding:2px 8px;cursor:pointer;">复制ID</button>
+                        </span>
                     </div>
                     <div class="chat-messages" id="chat-messages">
                         <div style="text-align: center; color: #666; padding: 40px;">
@@ -349,9 +342,8 @@
             <div id="sessions-list"></div>
         </div>
         
-        <footer style="text-align: center; padding: 20px; color: #666; font-size: 13px;">
-            <p>LangChainRust Demo - 向量搜索 + BM25 + RAG对话 + LangGraph</p>
-            <p style="margin-top: 8px;">Powered by Qdrant + MongoDB + OpenAI</p>
+        <footer style="text-align: center; padding: 8px; color: #94a3b8; font-size: 11px;">
+            LangChainRust Demo — 向量搜索 + BM25 + RAG对话 + LangGraph | Powered by Qdrant + MongoDB + OpenAI
         </footer>
         </div>
     </div>
@@ -367,7 +359,7 @@
         </div>
     </div>
     
-    <script src="js/app.js"></script>
+    <script src="js/app.js?v=2"></script>
     <script src="js/aggregate.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </body>

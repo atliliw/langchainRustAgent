@@ -1,4 +1,8 @@
 //! ArXiv 论文采集工具
+//!
+//! 调用 ArXiv API，搜索指定分类的最新论文
+//! API: GET /api/query?search_query=cat:{category}&start=0&max_results={n}
+//! 响应格式：Atom XML
 
 use crate::agents::{ContentSource, CollectedItem};
 use crate::errors::AgentError;
@@ -30,41 +34,29 @@ impl ArXivTool {
         }
     }
     
+    /// 获取最新论文
     pub async fn fetch_papers(&self, categories: &[&str], max_results: usize) -> Result<Vec<CollectedItem>, AgentError> {
         let category_query = categories.join(" OR ");
-        let url = format!(
-            "{}{}",
-            self.api_base,
-            format!(
-                "?search_query=cat:{}&start=0&max_results={}",
-                category_query, max_results
-            )
-        );
+        let url = format!("{}?search_query=cat:{}&start=0&max_results={}", self.api_base, category_query, max_results);
         
-        let response = self.client
-            .get(&url)
-            .send()
-            .await
+        let response = self.client.get(&url).send().await
             .map_err(|e| AgentError::NetworkError(e.to_string()))?;
         
         if !response.status().is_success() {
             return Err(AgentError::ApiError(format!("ArXiv API返回: {}", response.status())));
         }
         
-        let body = response
-            .text()
-            .await
+        let body = response.text().await
             .map_err(|e| AgentError::ParseError(e.to_string()))?;
         
         self.parse_arxiv(&body)
     }
     
+    /// 解析 ArXiv Atom XML（提取 <entry> 标签）
     fn parse_arxiv(&self, xml: &str) -> Result<Vec<CollectedItem>, AgentError> {
         let mut items = Vec::new();
-        
         let entry_starts: Vec<usize> = xml.match_indices("<entry>")
-            .map(|(i, _)| i)
-            .collect();
+            .map(|(i, _)| i).collect();
         
         for start in entry_starts {
             if let Some(end) = xml[start..].find("</entry>") {
@@ -75,17 +67,13 @@ impl ArXivTool {
                 let summary = self.extract_tag(entry_xml, "summary");
                 let published = self.extract_tag(entry_xml, "published");
                 
-                let authors: Vec<String> = entry_xml
-                    .match_indices("<author>")
+                let authors: Vec<String> = entry_xml.match_indices("<author>")
                     .filter_map(|(a_start, _)| {
                         if let Some(a_end) = entry_xml[a_start..].find("</author>") {
                             let author_xml = &entry_xml[a_start..a_start + a_end + 8];
                             self.extract_tag(author_xml, "name")
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+                        } else { None }
+                    }).collect();
                 
                 let published_at = published.as_ref()
                     .and_then(|p| DateTime::parse_from_rfc3339(p).ok())
@@ -116,14 +104,12 @@ impl ArXivTool {
                 }
             }
         }
-        
         Ok(items)
     }
     
     fn extract_tag(&self, xml: &str, tag: &str) -> Option<String> {
         let open = format!("<{}>", tag);
         let close = format!("</{}>", tag);
-        
         if let Some(start) = xml.find(&open) {
             let content_start = start + open.len();
             if let Some(end) = xml[content_start..].find(&close) {
@@ -135,7 +121,5 @@ impl ArXivTool {
 }
 
 impl Default for ArXivTool {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }

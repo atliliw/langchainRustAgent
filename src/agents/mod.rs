@@ -1,15 +1,16 @@
-//! AI Agent 信息聚合采集模块
+//! Agent 数据采集工具
 //!
-//! 支持数据源：
-//! - GitHub Trending
-//! - Hacker News
-//! - RSS博客订阅
-//! - ArXiv论文
+//! 从多个外部数据源采集 AI/Agent 相关的信息，统一成 CollectedItem 格式。
+//!
+//! GitHub         → GitHub Trending 仓库（按语言搜索）
+//! HackerNews     → HN Algolia 搜索（AI/Agent 相关讨论）
+//! RSS            → OpenAI/Anthropic 博客更新
+//! ArXiv          → 最新 AI 论文
 
-pub mod github;
-pub mod hackernews;
-pub mod rss;
-pub mod arxiv;
+pub mod github;       // GitHub Trending 采集
+pub mod hackernews;   // HackerNews 采集
+pub mod rss;          // RSS 订阅采集
+pub mod arxiv;        // ArXiv 论文采集
 
 pub use github::GitHubTool;
 pub use hackernews::HackerNewsTool;
@@ -18,6 +19,7 @@ pub use arxiv::ArXivTool;
 
 use serde::{Deserialize, Serialize};
 
+/// 数据来源类型
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ContentSource {
     GitHub,
@@ -47,14 +49,16 @@ impl ContentSource {
     }
 }
 
+/// 统一采集结果格式
+/// 不管从哪个渠道采集，最终都转成这个结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectedItem {
-    pub id: String,
-    pub source: ContentSource,
-    pub title: String,
-    pub content: String,
-    pub url: String,
-    pub author: Option<String>,
-    pub published_at: Option<i64>,
-    pub metadata: serde_json::Value,
+    pub id: String,                        // 唯一ID
+    pub source: ContentSource,              // 来源
+    pub title: String,                      // 标题
+    pub content: String,                    // 内容
+    pub url: String,                        // 原始链接
+    pub author: Option<String>,             // 作者
+    pub published_at: Option<i64>,          // 发布时间
+    pub metadata: serde_json::Value,        // 附加元数据
 }
