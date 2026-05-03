@@ -9,9 +9,10 @@
 //!
 //! 本质：展示"多个Agent/任务怎么协作"，这是面试考察的重点
 
-use crate::handlers::ApiErrorResponse;
+use crate::handlers::{ApiErrorResponse, AppState};
 use crate::models::*;
-use axum::Json;
+use axum::{extract::State, Json};
+use std::sync::Arc;
 
 /// 获取 LangGraph 演示信息
 /// GET /api/langgraph/info
@@ -61,5 +62,17 @@ pub async fn get_langgraph_structure(
     Json(request): Json<LangGraphStructureRequest>,
 ) -> Result<Json<LangGraphStructureResponse>, ApiErrorResponse> {
     let result = crate::services::ApiService::get_langgraph_structure(request.mode)?;
+    Ok(Json(result))
+}
+
+/// AI 任务拆解 + 执行
+/// POST /api/langgraph/decompose
+/// 请求: { task: "用户任务" }
+/// 返回: 图结构 + 子任务定义 + 执行结果
+pub async fn decompose_task(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<TaskDecomposeRequest>,
+) -> Result<Json<TaskDecomposeResult>, ApiErrorResponse> {
+    let result = state.api.decompose_task(request.task).await?;
     Ok(Json(result))
 }

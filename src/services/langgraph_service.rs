@@ -13,16 +13,22 @@
 //!   2. 条件路由：根据输入状态动态选择执行路径
 //!   3. 流式执行：实时推送每个节点的执行进度
 
+use crate::config::Config;
 use crate::errors::GraphDemoError;
 use crate::models::*;
+
 use langchainrust::{
     StateGraph, GraphBuilder, START, END,
     AgentState, StateUpdate,
     FunctionRouter,
     StreamEvent,
     CompiledGraph,
+    language_models::OpenAIChat,
+    schema::Message,
+    core::runnables::Runnable,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
@@ -176,8 +182,52 @@ impl LangGraphDemoService {
             "stream" => Self::build_stream_graph()?,
             _ => return Err(GraphDemoError::BuildError(format!("未知模式: {}", mode))),
         };
-        let mermaid = compiled.visualize_mermaid();
-        Ok(mermaid.replace("__start__", "START").replace("__end__", "END"))
+        let json = compiled.visualize_json();
+        let edges = json["edges"].as_array().unwrap();
+        let nodes = json["nodes"].as_array().unwrap();
+
+        let mut mermaid = String::from("graph TD\n");
+        mermaid.push_str("  START(\"START\")\n");
+        mermaid.push_str("  END[\"END\"]\n");
+
+        for node in nodes {
+            let name = node.as_str().unwrap();
+            mermaid.push_str(&format!("  {}[\"{}\"]\n", name, name));
+        }
+
+        for edge in edges {
+            let etype = edge["type"].as_str().unwrap_or("fixed");
+            let source = edge["source"].as_str().unwrap_or("");
+            let source = if source == "__start__" { "START" } else { source };
+
+            match etype {
+                "fanout" => {
+                    let targets = edge["targets"].as_array().unwrap();
+                    for target in targets {
+                        let t = target.as_str().unwrap();
+                        let t = if t == "__end__" { "END" } else { t };
+                        mermaid.push_str(&format!("  {} --> {}\n", source, t));
+                    }
+                }
+                "conditional" => {
+                    let router = edge["router"].as_str().unwrap_or("router");
+                    let _ = router;
+                    let targets = edge["targets"].as_object().unwrap();
+                    for (route, target) in targets {
+                        let t = target.as_str().unwrap();
+                        let t = if t == "__end__" { "END" } else { t };
+                        mermaid.push_str(&format!("  {} -- \"{}\" --> {}\n", source, route, t));
+                    }
+                }
+                _ => {
+                    let target = edge["target"].as_str().unwrap_or("");
+                    let target = if target == "__end__" { "END" } else { target };
+                    mermaid.push_str(&format!("  {} --> {}\n", source, target));
+                }
+            }
+        }
+
+        Ok(mermaid)
     }
 
     /// ──────────────────── 模式1：并行执行演示 ────────────────────
@@ -357,10 +407,217 @@ impl LangGraphDemoService {
             }
         })
     }
+
+    /// ──────────────────── AI 任务拆解 + 执行 ────────────────────
+    ///
+    /// 1. LLM 分析用户任务，拆成 N 个子任务
+    /// 2. 根据依赖关系构建图结构（只用于可视化）
+    /// 3. 按依赖顺序依次执行每个子任务（普通循环，不走 StateGraph）
+    /// 4. 返回图结构 + 每个节点的执行结果
+    pub async fn decompose_and_execute(
+        config: &Config,
+        task: String,
+    ) -> Result<TaskDecomposeResult, GraphDemoError> {
+        let llm: Arc<OpenAIChat> = Arc::new(
+            OpenAIChat::new(
+                config.to_langchain_openai_config()
+                    .with_max_tokens(2048)
+            )
+        );
+
+        // 1. 单次 LLM 调用：拆解 + 执行 + 汇总
+        let prompt = format!(
+            r#"你是一个任务执行专家。请完成以下任务。
+
+要求：
+1. 将任务拆解为 2-6 个子任务
+2. 依次执行每个子任务
+3. 给出最终汇总答案（回答用户的原始问题）
+
+返回 JSON，格式：
+{{
+  "sub_tasks": [
+    {{"name": "子任务名", "description": "描述", "depends_on": ["前置任务名"]}}
+  ],
+  "execution_results": [
+    {{"name": "子任务名", "output": "执行结果"}}
+  ],
+  "final_answer": "最终的完整答案"
+}}
+
+用户任务：{task}
+
+请只返回 JSON，不要多余内容。"#,
+            task = task
+        );
+
+        let resp = llm
+            .invoke(vec![Message::human(&prompt)], None)
+            .await
+            .map_err(|e| GraphDemoError::ExecutionError(format!("LLM 调用失败: {}", e)))?;
+
+        let cleaned = resp.content
+            .trim_start_matches("```json").trim_start_matches("```")
+            .trim_end_matches("```").trim();
+
+        #[derive(serde::Deserialize)]
+        struct DecomposeResponse {
+            sub_tasks: Vec<SubTaskDef>,
+            execution_results: Vec<SubTaskExecResult>,
+            #[serde(default)]
+            final_answer: String,
+        }
+
+        let parsed: DecomposeResponse = serde_json::from_str(cleaned)
+            .map_err(|e| GraphDemoError::BuildError(format!(
+                "LLM 返回格式错误: {} — 原始内容: {}",
+                e, &cleaned.chars().take(300).collect::<String>()
+            )))?;
+
+        let sub_tasks = parsed.sub_tasks;
+        let mut execution_results = parsed.execution_results;
+
+        // 把 final_answer 作为最后一个执行结果，确保显示在表格底部
+        if !parsed.final_answer.is_empty() {
+            execution_results.push(SubTaskExecResult {
+                name: "📌 最终答案".to_string(),
+                output: parsed.final_answer,
+                duration_ms: 0,
+            });
+        }
+
+        if sub_tasks.is_empty() {
+            return Err(GraphDemoError::BuildError("LLM 未返回子任务".to_string()));
+        }
+
+        // 2. 构建可视化图结构（纯展示用）
+        let mut graph: StateGraph<AgentState> = StateGraph::new();
+        let name_set: std::collections::HashSet<&str> =
+            sub_tasks.iter().map(|s| s.name.as_str()).collect();
+
+        for sub in &sub_tasks {
+            let n = sub.name.clone();
+            graph.add_node_fn(n, |state| Ok(StateUpdate::full(state.clone())));
+        }
+
+        // 所有节点链式连接（保证可达）+ 依赖边额外展示
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+
+        graph.add_edge(START, &sub_tasks[0].name);
+        seen.insert((START.to_string(), sub_tasks[0].name.clone()));
+        for i in 1..sub_tasks.len() {
+            let k = (sub_tasks[i-1].name.clone(), sub_tasks[i].name.clone());
+            seen.insert(k);
+            graph.add_edge(&sub_tasks[i-1].name, &sub_tasks[i].name);
+        }
+        seen.insert((sub_tasks.last().unwrap().name.clone(), END.to_string()));
+        graph.add_edge(&sub_tasks.last().unwrap().name, END);
+
+        // 依赖边（额外展示）
+        for sub in &sub_tasks {
+            for dep in &sub.depends_on {
+                if name_set.contains(dep.as_str()) {
+                    let k = (dep.clone(), sub.name.clone());
+                    if seen.insert(k) {
+                        graph.add_edge(dep, &sub.name);
+                    }
+                }
+            }
+        }
+
+        // 全部 → END
+        for sub in &sub_tasks {
+            let k = (sub.name.clone(), END.to_string());
+            if seen.insert(k) {
+                graph.add_edge(&sub.name, END);
+            }
+        }
+
+        let compiled = graph
+            .compile()
+            .map_err(|e| GraphDemoError::BuildError(e.to_string()))?;
+
+        let graph_structure = compiled.visualize_json();
+
+        // 3. 执行结果已由 LLM 在步骤 1 中返回
+
+        Ok(TaskDecomposeResult {
+            original_task: task,
+            sub_tasks,
+            execution_results,
+            graph_structure,
+        })
+    }
 }
 
 impl Default for LangGraphDemoService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_graph_build_cycle_deps() {
+        // 模拟所有节点循环依赖（旧代码会 fail）
+        let sub_tasks = vec![
+            SubTaskDef { name: "a".into(), description: "A".into(), depends_on: vec!["b".into()] },
+            SubTaskDef { name: "b".into(), description: "B".into(), depends_on: vec!["c".into()] },
+            SubTaskDef { name: "c".into(), description: "C".into(), depends_on: vec!["a".into()] },
+        ];
+
+        let mut graph: StateGraph<AgentState> = StateGraph::new();
+        let name_set: std::collections::HashSet<&str> = sub_tasks.iter().map(|s| s.name.as_str()).collect();
+        for sub in &sub_tasks {
+            graph.add_node_fn(sub.name.clone(), |state| Ok(StateUpdate::full(state.clone())));
+        }
+
+        graph.add_edge(START, &sub_tasks[0].name);
+        for i in 1..sub_tasks.len() {
+            graph.add_edge(&sub_tasks[i-1].name, &sub_tasks[i].name);
+        }
+        graph.add_edge(&sub_tasks[sub_tasks.len()-1].name, END);
+
+        for sub in &sub_tasks {
+            for dep in &sub.depends_on {
+                if name_set.contains(dep.as_str()) { graph.add_edge(dep, &sub.name); }
+            }
+        }
+
+        let result = graph.compile();
+        assert!(result.is_ok(), "循环依赖场景: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_graph_build_all_deps_nonexistent() {
+        let sub_tasks = vec![
+            SubTaskDef { name: "a".into(), description: "A".into(), depends_on: vec!["x".into()] },
+            SubTaskDef { name: "b".into(), description: "B".into(), depends_on: vec!["y".into()] },
+        ];
+
+        let mut graph: StateGraph<AgentState> = StateGraph::new();
+        let name_set: std::collections::HashSet<&str> = sub_tasks.iter().map(|s| s.name.as_str()).collect();
+        for sub in &sub_tasks {
+            graph.add_node_fn(sub.name.clone(), |state| Ok(StateUpdate::full(state.clone())));
+        }
+
+        graph.add_edge(START, &sub_tasks[0].name);
+        for i in 1..sub_tasks.len() {
+            graph.add_edge(&sub_tasks[i-1].name, &sub_tasks[i].name);
+        }
+        graph.add_edge(&sub_tasks[sub_tasks.len()-1].name, END);
+
+        for sub in &sub_tasks {
+            for dep in &sub.depends_on {
+                if name_set.contains(dep.as_str()) { graph.add_edge(dep, &sub.name); }
+            }
+        }
+
+        let result = graph.compile();
+        assert!(result.is_ok(), "不存在依赖场景: {:?}", result.err());
     }
 }

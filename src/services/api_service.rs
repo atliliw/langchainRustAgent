@@ -409,6 +409,11 @@ impl ApiService {
         Ok(LangGraphStructureResponse { mode, mermaid, structure })
     }
     
+    pub async fn decompose_task(&self, task: String) -> Result<TaskDecomposeResult, ApiError> {
+        LangGraphDemoService::decompose_and_execute(&self.config, task).await
+            .map_err(|e| ApiError::SearchError(e.to_string()))
+    }
+    
     /// ──────────────────── API统计 ────────────────────
     
     pub async fn get_api_stats(&self) -> Result<ApiStatsSummary, ApiError> {

@@ -930,8 +930,6 @@ function showResult(elementId, type, message) {
 function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
 function formatTime(timestamp) { const date = new Date(timestamp); return date.toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }
 
-let _selectedMode = null;
-
 async function loadLangGraphInfo() {
     try {
         const res = await fetch(`${API_BASE}/langgraph/info`);
@@ -942,103 +940,314 @@ async function loadLangGraphInfo() {
     } catch (e) { /* ignore */ }
 }
 
-async function showLangGraphStructure(mode) {
-    _selectedMode = mode;
-    const input = document.getElementById('langgraph-input').value || '测试输入';
-    const container = document.getElementById('mermaid-container');
+async function runDecompose() {
+    const task = document.getElementById('decompose-input').value.trim();
+    if (!task) { showToast('请输入任务'); return; }
+
     const viz = document.getElementById('langgraph-viz');
-    const actionBar = document.getElementById('langgraph-action-bar');
-    const title = document.getElementById('graph-title');
-    const desc = document.getElementById('graph-desc');
+    const container = document.getElementById('mermaid-container');
+    const results = document.getElementById('langgraph-results');
 
-    const modeNames = { parallel: '并行执行', conditional: '条件路由', stream: '流式执行' };
-    const modeDescs = {
-        parallel: 'FanOut → 3个并行任务同时跑，总耗时≈最慢任务',
-        conditional: '根据输入长度(&lt;10)动态选择处理路径',
-        stream: 'step1→step2→step3 逐步推送执行事件'
-    };
-
-    title.textContent = `📐 ${modeNames[mode]} - 图结构`;
-    desc.textContent = modeDescs[mode] || '';
-    container.textContent = '加载中...';
     viz.style.display = 'block';
+    document.getElementById('graph-title').textContent = '🤖 AI 正在拆解任务...';
+    document.getElementById('graph-desc').textContent = '';
+    container.innerHTML = '<div style="text-align:center;color:#94a3b8;padding:30px;">⏳ LLM 分析中...</div>';
+    results.innerHTML = '';
 
     try {
-        const res = await fetch(`${API_BASE}/langgraph/structure`, {
+        const res = await fetch(`${API_BASE}/langgraph/decompose`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode })
+            body: JSON.stringify({ task })
         });
+        if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            throw new Error(errData.error || `服务器返回 ${res.status}`);
+        }
         const data = await res.json();
 
-        container.innerHTML = data.mermaid;
-        await mermaid.run({ nodes: [container] });
+        if (!data.sub_tasks || !data.graph_structure) {
+            throw new Error('LLM 返回格式异常，请重试');
+        }
 
-        document.getElementById('btn-run-demo').style.display = 'inline-block';
-        document.getElementById('selected-mode-display').textContent = `当前模式: ${modeNames[mode]} | 输入: "${input}"`;
+        document.getElementById('graph-title').textContent = `🤖 任务拆解: ${escapeHtml(data.original_task)}`;
+        document.getElementById('graph-desc').textContent = `${data.sub_tasks.length} 个子任务`;
+
+        const annotations = {};
+        (data.execution_results || []).forEach(r => {
+            annotations[r.name] = { label: r.output, ms: r.duration_ms };
+        });
+        container.innerHTML = renderGraphHtml(data.graph_structure, annotations);
+
+        let detailHtml = `<h3 style="color:#10b981;margin-top:20px;">执行结果</h3>`;
+        detailHtml += `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;">`;
+        detailHtml += `<p><strong>原始任务：</strong>${escapeHtml(data.original_task)}</p>`;
+        detailHtml += `<p><strong>子任务数：</strong>${data.sub_tasks.length}</p>`;
+        detailHtml += `<table style="width:100%;margin-top:10px;border-collapse:collapse;">
+            <thead><tr style="background:#f1f5f9;">
+                <th style="padding:8px;border:1px solid #e2e8f0;">子任务</th>
+                <th style="padding:8px;border:1px solid #e2e8f0;">描述</th>
+                <th style="padding:8px;border:1px solid #e2e8f0;">输出</th>
+                <th style="padding:8px;border:1px solid #e2e8f0;">耗时</th>
+            </tr></thead>
+            <tbody>`;
+        data.sub_tasks.forEach((st, i) => {
+            const execResult = (data.execution_results || [])[i];
+            const isFinal = st.name && st.name.includes('最终答案');
+            const bgStyle = isFinal ? 'background:#f0fdf4;' : '';
+            detailHtml += `<tr style="${bgStyle}">
+                <td style="padding:8px;border:1px solid #e2e8f0;">${escapeHtml(st.name)}${isFinal ? ' 🎯' : ''}</td>
+                <td style="padding:8px;border:1px solid #e2e8f0;">${isFinal ? '汇总回答' : escapeHtml(st.description || '')}</td>
+                <td style="padding:8px;border:1px solid #e2e8f0;">${execResult ? escapeHtml(execResult.output) : '-'}</td>
+                <td style="padding:8px;border:1px solid #e2e8f0;">${execResult ? execResult.duration_ms + 'ms' : '-'}</td>
+            </tr>`;
+        });
+        // 如果 execution_results 有多余的条目（如 final_answer），追加显示
+        if (data.execution_results && data.execution_results.length > data.sub_tasks.length) {
+            for (let i = data.sub_tasks.length; i < data.execution_results.length; i++) {
+                const r = data.execution_results[i];
+                if (r.name && r.name.includes('最终答案')) {
+                    detailHtml += `<tr style="background:#f0fdf4;">
+                        <td style="padding:8px;border:1px solid #e2e8f0;">📌 最终答案 🎯</td>
+                        <td style="padding:8px;border:1px solid #e2e8f0;">汇总回答</td>
+                        <td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;">${escapeHtml(r.output)}</td>
+                        <td style="padding:8px;border:1px solid #e2e8f0;">-</td>
+                    </tr>`;
+                }
+            }
+        }
+        detailHtml += `</tbody></table></div>`;
+        results.innerHTML = detailHtml;
     } catch (e) {
-        container.innerHTML = `<div style="color: #e94560; text-align: center; padding: 20px;">加载失败: ${e.message}</div>`;
+        container.innerHTML = `<div style="color:#e94560;text-align:center;padding:20px;">失败: ${e.message}</div>`;
     }
 }
 
-async function runSelectedDemo() {
-    if (!_selectedMode) return;
+const LG_MODE = {
+    parallel: { name: '并行执行', color: '#667eea', desc: 'FanOut → 3个任务同时跑' },
+    conditional: { name: '条件路由', color: '#f5576c', desc: '根据输入长度动态选路径' },
+    stream: { name: '流式执行', color: '#4facfe', desc: 'step1→step2→step3 逐步执行' },
+};
+
+async function showLangGraphStructure(mode) {
     const input = document.getElementById('langgraph-input').value || '测试输入';
-    const results = document.getElementById('langgraph-results');
+    const container = document.getElementById('mermaid-container');
+    const viz = document.getElementById('langgraph-viz');
+    const info = LG_MODE[mode];
 
-    const modeNames = { parallel: '并行执行', conditional: '条件路由', stream: '流式执行' };
-    const modeColors = { parallel: '#667eea', conditional: '#f5576c', stream: '#4facfe' };
-
-    showResult('langgraph-results', 'loading', `正在执行${modeNames[_selectedMode]}...`);
+    document.getElementById('graph-title').textContent = `📐 ${info.name} - 图结构`;
+    document.getElementById('graph-desc').textContent = info.desc;
+    container.innerHTML = '<div style="text-align:center;color:#94a3b8;padding:20px;">执行中...</div>';
+    viz.style.display = 'block';
 
     try {
-        const res = await fetch(`${API_BASE}/langgraph/${_selectedMode}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ input })
-        });
-        const data = await res.json();
+        const [strucRes, execRes] = await Promise.all([
+            fetch(`${API_BASE}/langgraph/structure`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode })
+            }),
+            fetch(`${API_BASE}/langgraph/${mode}`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ input })
+            }),
+        ]);
 
-        let html = `<h3 style="color: ${modeColors[_selectedMode]};">${modeNames[_selectedMode]}结果</h3>`;
+        const strucData = await strucRes.json();
+        const execData = await execRes.json();
 
-        if (_selectedMode === 'parallel') {
-            html += `<div style="background: rgba(255,255,255,0.05); padding: 15px; border-radius: 8px;">
-                <p><strong>输入：</strong>${escapeHtml(data.input)}</p>
-                <p><strong>合并结果：</strong>${escapeHtml(data.merged_result)}</p>
-                <p><strong>总耗时：</strong>${data.total_time_ms}ms</p>
-                <p><strong>节省时间：</strong>${data.time_saved_percent.toFixed(1)}%</p>
-                <h4 style="margin-top: 15px;">并行任务：</h4>
-                <ul>${data.parallel_tasks.map(t => `<li>${t.task_name}: ${t.result} (${t.duration_ms}ms)</li>`).join('')}</ul>
-            </div>`;
-        } else if (_selectedMode === 'conditional') {
-            html += `<div style="background: rgba(255,255,255,0.05); padding: 15px; border-radius: 8px;">
-                <p><strong>输入：</strong>${escapeHtml(data.input)} (长度: ${data.input.length})</p>
-                <p><strong>路由决策：</strong>${escapeHtml(data.route_decision)}</p>
-                <p><strong>执行路径：</strong>${escapeHtml(data.path_taken)}</p>
-                <p><strong>输出：</strong>${escapeHtml(data.output)}</p>
-                <h4 style="margin-top: 15px;">执行步骤：</h4>
-                <ol>${data.steps.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ol>
-            </div>`;
-        } else if (_selectedMode === 'stream') {
-            html += `<div style="background: rgba(255,255,255,0.05); padding: 15px; border-radius: 8px;">
-                <p><strong>事件数量：</strong>${data.length}</p>
-                <table style="width: 100%; margin-top: 15px;">
-                    <thead><tr style="background: rgba(255,255,255,0.1);">
-                        <th style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">节点</th>
-                        <th style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">事件类型</th>
-                        <th style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">时间(ms)</th>
-                    </tr></thead>
-                    <tbody>${data.map(e => `<tr>
-                        <td style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(e.node_name)}</td>
-                        <td style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(e.event_type)}</td>
-                        <td style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">${e.timestamp_ms}</td>
-                    </tr>`).join('')}</tbody>
-                </table>
-            </div>`;
-        }
-        results.innerHTML = html;
-    } catch (e) { showResult('langgraph-results', 'error', `执行失败: ${e.message}`); }
+        const annotations = buildAnnotations(mode, execData);
+        container.innerHTML = renderGraphHtml(strucData.structure, annotations);
+        document.getElementById('langgraph-results').innerHTML = renderExecResults(mode, execData);
+    } catch (e) {
+        container.innerHTML = `<div style="color:#e94560;text-align:center;padding:20px;">失败: ${e.message}</div>`;
+    }
 }
+
+function buildAnnotations(mode, data) {
+    const ann = {};
+    if (mode === 'parallel') {
+        const taskMap = { 'TaskA': 'task_a', 'TaskB': 'task_b', 'TaskC': 'task_c' };
+        (data.parallel_tasks || []).forEach(t => {
+            const nodeName = taskMap[t.task_name] || t.task_name.toLowerCase();
+            ann[nodeName] = { label: t.result, ms: t.duration_ms };
+        });
+        ann['dispatcher'] = { label: '将任务分发给 3 个并行节点', ms: 0 };
+    } else if (mode === 'conditional') {
+        ann['analyze'] = { label: `分析输入，长度=${data.input.length}`, ms: 0 };
+        const nodeName = data.path_taken;
+        ann[nodeName] = { label: data.output, ms: 0 };
+    } else if (mode === 'stream') {
+        (data || []).forEach(e => {
+            if (e.event_type === 'complete' || e.event_type === 'enter') {
+                ann[e.node_name] = { label: `执行中`, ms: e.timestamp_ms };
+            }
+        });
+    }
+    return ann;
+}
+
+function renderExecResults(mode, data) {
+    const info = LG_MODE[mode];
+    let html = `<h3 style="color:${info.color};margin-top:20px;">${info.name}结果</h3>`;
+
+    if (mode === 'parallel') {
+        html += `<div style="border:1px solid #e2e8f0;padding:15px;border-radius:8px;">
+            <p><strong>输入：</strong>${escapeHtml(data.input)}</p>
+            <p><strong>结果：</strong>${escapeHtml(data.merged_result)}</p>
+            <p><strong>总耗时：</strong>${data.total_time_ms}ms | <strong>节省：</strong>${data.time_saved_percent.toFixed(1)}%</p>
+            <h4 style="margin-top:10px;">并行任务：</h4>
+            <ul>${data.parallel_tasks.map(t => `<li>${t.task_name}: ${t.result} (${t.duration_ms}ms)</li>`).join('')}</ul>
+        </div>`;
+    } else if (mode === 'conditional') {
+        html += `<div style="border:1px solid #e2e8f0;padding:15px;border-radius:8px;">
+            <p><strong>输入：</strong>${escapeHtml(data.input)} (长度: ${data.input.length})</p>
+            <p><strong>路由决策：</strong>${escapeHtml(data.route_decision)}</p>
+            <p><strong>执行路径：</strong>${escapeHtml(data.path_taken)}</p>
+            <p><strong>输出：</strong>${escapeHtml(data.output)}</p>
+            <h4 style="margin-top:10px;">步骤：</h4>
+            <ol>${data.steps.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ol>
+        </div>`;
+    } else if (mode === 'stream') {
+        html += `<div style="border:1px solid #e2e8f0;padding:15px;border-radius:8px;">
+            <p><strong>事件数：</strong>${data.length}</p>
+            <table style="width:100%;margin-top:10px;border-collapse:collapse;">
+                <thead><tr style="background:#f1f5f9;">
+                    <th style="padding:8px;border:1px solid #e2e8f0;">节点</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0;">事件</th>
+                    <th style="padding:8px;border:1px solid #e2e8f0;">时间(ms)</th>
+                </tr></thead>
+                <tbody>${data.map(e => `<tr>
+                    <td style="padding:8px;border:1px solid #e2e8f0;">${escapeHtml(e.node_name)}</td>
+                    <td style="padding:8px;border:1px solid #e2e8f0;">${escapeHtml(e.event_type)}</td>
+                    <td style="padding:8px;border:1px solid #e2e8f0;">${e.timestamp_ms}</td>
+                </tr>`).join('')}</tbody>
+            </table>
+        </div>`;
+    }
+    return html;
+}
+
+function renderGraphHtml(structure, annotations) {
+    annotations = annotations || {};
+    const nodes = structure.nodes || [];
+    const edges = structure.edges || [];
+    const entry = structure.entry_point || '';
+    const nodeColors = {};
+    nodes.forEach(n => {
+        if (n === entry) nodeColors[n] = '#10b981';
+        else nodeColors[n] = '#3b82f6';
+    });
+
+    let html = '<div style="display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px;">';
+    html += renderGraphNode('START', '#10b981', 'START', null);
+    html += renderArrow();
+    html += renderFlowLevel(nodes, edges, entry, nodeColors, annotations);
+    html += renderArrow();
+    html += renderGraphNode('END', '#ef4444', 'END', null);
+    html += '</div>';
+    return html;
+}
+
+function renderFlowLevel(nodes, edges, entry, nodeColors, annotations) {
+    const outgoing = {};
+    edges.forEach(e => {
+        const src = e.source === '__start__' ? 'START' : e.source;
+        if (!outgoing[src]) outgoing[src] = [];
+        outgoing[src].push(e);
+    });
+
+    const visited = new Set();
+    const levels = [];
+    let current = new Set(['START']);
+    while (current.size > 0) {
+        const next = new Set();
+        const level = [];
+        current.forEach(s => {
+            if (visited.has(s)) return;
+            visited.add(s);
+            if (s !== 'START' && s !== 'END') level.push(s);
+            const edgesFrom = outgoing[s] || [];
+            edgesFrom.forEach(e => {
+                if (e.type === 'fanout') {
+                    (e.targets || []).forEach(t => {
+                        const tn = t === '__end__' ? 'END' : t;
+                        if (!visited.has(tn)) next.add(tn);
+                    });
+                } else if (e.type === 'conditional') {
+                    Object.values(e.targets || {}).forEach(t => {
+                        const tn = t === '__end__' ? 'END' : t;
+                        if (!visited.has(tn)) next.add(tn);
+                    });
+                } else {
+                    const tn = (e.target === '__end__' ? 'END' : e.target);
+                    if (!visited.has(tn)) next.add(tn);
+                }
+            });
+        });
+        if (level.length > 0) levels.push(level);
+        current = next;
+    }
+
+    let html = '';
+    levels.forEach((level, li) => {
+        if (li > 0) html += renderArrow();
+        if (level.length === 1) {
+            html += renderGraphNode(level[0], nodeColors[level[0]] || '#3b82f6', level[0], annotations[level[0]] || null);
+        } else {
+            html += '<div style="display:flex;gap:24px;justify-content:center;">';
+            level.forEach(n => {
+                html += renderGraphNode(n, nodeColors[n] || '#3b82f6', n, annotations[n] || null);
+            });
+            html += '</div>';
+            const edge = outgoing[level[0]] || [];
+            if (edge.find(e => e.type === 'fanout')) {
+                html += '<div style="font-size:11px;color:#64748b;margin-top:2px;">[FanOut 并行]</div>';
+            }
+            if (edge.find(e => e.type === 'conditional')) {
+                html += '<div style="font-size:11px;color:#64748b;margin-top:2px;">[条件路由]</div>';
+            }
+        }
+    });
+    return html;
+}
+
+const NODE_ROLES = {
+    dispatcher: { icon: '📨', role: '任务分发' },
+    task_a: { icon: '📥', role: '数据获取' },
+    task_b: { icon: '📄', role: '文档处理' },
+    task_c: { icon: '📊', role: '内容分析' },
+    analyze: { icon: '🔍', role: '输入分析' },
+    quick_process: { icon: '⚡', role: '快速处理' },
+    detailed_process: { icon: '📋', role: '详细分析' },
+    step1: { icon: '①', role: '第一步' },
+    step2: { icon: '②', role: '第二步' },
+    step3: { icon: '③', role: '第三步' },
+};
+
+function renderGraphNode(name, color, label, annotation) {
+    const bg = color + '22';
+    const border = color;
+    const role = NODE_ROLES[name];
+    const icon = role ? role.icon + ' ' : '';
+    const roleText = role ? `<div style="font-size:11px;color:#64748b;margin-top:2px;">${role.role}</div>` : '';
+    let html = `<div style="display:inline-flex;flex-direction:column;align-items:center;min-width:140px;">`;
+    html += `<div style="background:${bg};border:2px solid ${border};border-radius:10px;padding:8px 16px;text-align:center;">`;
+    html += `<div style="font-weight:bold;font-size:14px;color:#1e293b;">${icon}${label}</div>`;
+    html += roleText;
+    html += `</div>`;
+    if (annotation) {
+        const msText = annotation.ms ? ` (${annotation.ms}ms)` : '';
+        html += `<div style="margin-top:4px;font-size:11px;color:#475569;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:4px 10px;max-width:200px;text-align:center;word-break:break-all;">${escapeHtml(annotation.label)}${msText}</div>`;
+    }
+    html += '</div>';
+    return html;
+}
+
+function renderArrow() {
+    return '<div style="color:#94a3b8;font-size:18px;">↓</div>';
+}
+
+
 
 async function regenerateMessage(msgId) {
     if (!confirm('确定重新生成这条AI回复？')) return;

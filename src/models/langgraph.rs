@@ -20,6 +20,38 @@ pub struct LangGraphStructureResponse {
     pub structure: serde_json::Value,
 }
 
+/// 任务拆解请求
+#[derive(Deserialize)]
+pub struct TaskDecomposeRequest {
+    pub task: String,
+}
+
+/// 子任务定义（LLM 拆解结果）
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SubTaskDef {
+    pub name: String,
+    pub description: String,
+    pub depends_on: Vec<String>,
+}
+
+/// 子任务执行结果
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SubTaskExecResult {
+    pub name: String,
+    pub output: String,
+    #[serde(default)]
+    pub duration_ms: u64,
+}
+
+/// 任务拆解 + 执行结果
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TaskDecomposeResult {
+    pub original_task: String,
+    pub sub_tasks: Vec<SubTaskDef>,
+    pub execution_results: Vec<SubTaskExecResult>,
+    pub graph_structure: serde_json::Value,
+}
+
 /// 并行执行结果
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ParallelDemoResult {

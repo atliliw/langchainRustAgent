@@ -119,6 +119,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         
         .route("/api/langgraph/structure", axum::routing::post(langgraph::get_langgraph_structure))
         // 获取图结构（含 Mermaid 可视化语法）
+        
+        .route("/api/langgraph/decompose", axum::routing::post(langgraph::decompose_task))
+        // AI 任务拆解 + 执行（LLM 动态拆解 + 建图 + 执行）
 
         // ────────────────────── 文档管理 ──────────────────────
         .route("/api/documents", axum::routing::get(document::list_documents))

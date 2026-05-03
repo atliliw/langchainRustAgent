@@ -157,27 +157,38 @@
         
         <div id="langgraph-tab" class="card hidden">
             <h2>🔗 LangGraph 任务编排可视化</h2>
-            <p style="color: #666; margin-bottom: 15px;">输入一个任务，查看它的图结构拆解，然后选择执行模式</p>
+            
+            <!-- 演示模式 -->
             <div style="margin-bottom: 15px;">
-                <label>输入任务：</label>
+                <h4 style="color:#64748b;margin-bottom:8px;">🎯 演示模式（固定结构）</h4>
                 <input type="text" id="langgraph-input" value="测试输入" style="width: 300px; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-top: 10px;">
+                    <button class="btn" onclick="showLangGraphStructure('parallel')" style="background: linear-gradient(135deg, #667eea, #764ba2);">🔀 并行执行</button>
+                    <button class="btn" onclick="showLangGraphStructure('conditional')" style="background: linear-gradient(135deg, #f093fb, #f5576c);">🔀 条件路由</button>
+                    <button class="btn" onclick="showLangGraphStructure('stream')" style="background: linear-gradient(135deg, #4facfe, #00f2fe);">▶️ 流式执行</button>
+                </div>
             </div>
-            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px;">
-                <button class="btn" onclick="showLangGraphStructure('parallel')" style="background: linear-gradient(135deg, #667eea, #764ba2);">🔀 并行执行</button>
-                <button class="btn" onclick="showLangGraphStructure('conditional')" style="background: linear-gradient(135deg, #f093fb, #f5576c);">🔀 条件路由</button>
-                <button class="btn" onclick="showLangGraphStructure('stream')" style="background: linear-gradient(135deg, #4facfe, #00f2fe);">▶️ 流式执行</button>
+            
+            <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;">
+            
+            <!-- AI 任务拆解 -->
+            <div style="margin-bottom: 15px;">
+                <h4 style="color:#10b981;margin-bottom:8px;">🤖 AI 任务拆解（真实动态分解）</h4>
+                <p style="color:#64748b;font-size:13px;">输入一个真实任务，LLM 自动拆解为子任务并执行</p>
+                <div style="display:flex;gap:10px;">
+                    <input type="text" id="decompose-input" placeholder="输入一个任务，比如：写一篇关于AI的文章" style="flex:1;padding:10px;border:1px solid #10b981;border-radius:6px;font-size:14px;">
+                    <button class="btn" onclick="runDecompose()" style="background:#10b981;color:white;white-space:nowrap;">🚀 拆解执行</button>
+                </div>
             </div>
+            
             <div id="langgraph-viz" style="background: #ffffff; border: 2px solid #e2e8f0; border-radius: 12px; padding: 20px; margin-bottom: 15px; display: none;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
                     <h4 id="graph-title" style="margin: 0; color: #1e40af;">图结构</h4>
                     <span id="graph-desc" style="color: #64748b; font-size: 13px;"></span>
                 </div>
-                <div id="mermaid-container" class="mermaid" style="text-align: center;"></div>
+                <div id="mermaid-container" style="text-align: center;"></div>
             </div>
-            <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;" id="langgraph-action-bar">
-                <button class="btn" id="btn-run-demo" onclick="runSelectedDemo()" style="display: none; background: #10b981;">▶ 执行此图</button>
-                <span id="selected-mode-display" style="color: #64748b; font-size: 13px; align-self: center;"></span>
-            </div>
+
             <div id="langgraph-results"></div>
         </div>
         
@@ -377,10 +388,8 @@
         </div>
     </div>
     
-    <script src="js/app.js?v=2"></script>
+    <script src="js/app.js?v=3"></script>
     <script src="js/aggregate.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-    <script>mermaid.initialize({ startOnLoad: false, theme: 'default', flowchart: { useMaxWidth: true, htmlLabels: true } });</script>
 </body>
 </html>
