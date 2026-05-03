@@ -15,6 +15,7 @@ use axum::{
     Json,
     response::{sse::{Event, Sse}},
 };
+use serde::Deserialize;
 use futures_util::StreamExt;
 use std::sync::Arc;
 use std::time::Instant;
@@ -111,6 +112,7 @@ pub async fn chat_stream(
     let store = state.api.conversation_store.clone();
     let api = state.api.clone();
     let start_time = start;
+    let compress_mode_str = request.compress_mode.clone();
     
     // 创建一个异步流，逐 token 返回给前端
     let stream = async_stream::stream! {
@@ -146,6 +148,16 @@ pub async fn chat_stream(
         
         // 流式结束后，把完整消息存到 SQLite
         store.save_full_message(&sid, &user_msg, &full_reply).await.ok();
+        
+        // 后台压缩并持久化
+        let compress_mode = CompressMode::from_str(&compress_mode_str);
+        if compress_mode != CompressMode::None {
+            tracing::info!("开始压缩持久化: sid={}, mode={:?}", sid, compress_mode);
+            match store.compress_and_persist(&sid, compress_mode).await {
+                Ok(()) => tracing::info!("压缩持久化完成: sid={}", sid),
+                Err(e) => tracing::error!("压缩持久化失败: sid={}, err={:?}", sid, e),
+            }
+        }
         
         // 记录统计
         let duration = start_time.elapsed().as_millis() as i64;
@@ -299,4 +311,30 @@ pub async fn branch_session(
 ) -> Result<Json<BranchResponse>, ApiErrorResponse> {
     let response = state.api.branch_session(&request.session_id, &request.from_message_id).await?;
     Ok(Json(response))
+}
+
+/// 获取重要上下文
+/// GET /api/chat/context/:session_id
+#[derive(Deserialize)]
+pub struct SetContextRequest {
+    pub context: String,
+}
+
+pub async fn get_important_context(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    let context = state.api.conversation_store.get_important_context(&session_id).await
+        .map_err(|e| ApiErrorResponse(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "context": context })))
+}
+
+pub async fn set_important_context(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(request): Json<SetContextRequest>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    state.api.conversation_store.set_important_context(&session_id, &request.context).await
+        .map_err(|e| ApiErrorResponse(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "success": true })))
 }

@@ -101,6 +101,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // 分支会话: 从某条消息分叉出新会话
         
         .route("/api/chat/compress-modes", axum::routing::get(chat::get_compress_modes))
+        .route("/api/chat/context/:session_id", axum::routing::get(chat::get_important_context).put(chat::set_important_context))
         // 获取可用的压缩模式列表
 
         // ────────────────────── LangGraph 状态图演示 ──────────────────────

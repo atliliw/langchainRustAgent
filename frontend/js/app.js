@@ -490,14 +490,6 @@ function updateTotalTokens() {
     }).catch(function(){});
 }
 
-function updateSessionDisplay(sid) {
-    if (!sid) return;
-    document.getElementById('session-id-display').innerHTML = '🆔 ' + sid;
-    document.getElementById('session-copy-btn').style.display = 'inline-block';
-    window._currentSessionId = sid;
-    setTimeout(function() { updateTotalTokens(); }, 300);
-}
-
 function copyCurrentSessionId() {
     if (!window._currentSessionId) return;
     var input = document.createElement('input');
@@ -515,12 +507,42 @@ function copyCurrentSessionId() {
     document.body.removeChild(input);
 }
 
+async function showContextEditor() {
+    const sid = window._currentSessionId;
+    if (!sid) { showToast('请先创建或选择会话'); return; }
+    try {
+        const res = await fetch(`/api/chat/context/${sid}`);
+        const data = await res.json();
+        const current = data.context || '';
+        const newContext = prompt('编辑重要上下文（LLM会自动提取，你也可以手动修改）：', current);
+        if (newContext === null) return;
+        await fetch(`/api/chat/context/${sid}`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ context: newContext })
+        });
+        showToast('重要上下文已更新');
+    } catch (e) {
+        showToast('加载失败: ' + e.message);
+    }
+}
+
+function updateSessionDisplay(sid) {
+    if (!sid) return;
+    document.getElementById('session-id-display').innerHTML = '🆔 ' + sid;
+    document.getElementById('session-copy-btn').style.display = 'inline-block';
+    document.getElementById('context-btn').style.display = 'inline-block';
+    window._currentSessionId = sid;
+    setTimeout(function() { updateTotalTokens(); }, 300);
+}
+
 async function newSession() {
     currentSessionId = null;
     localStorage.removeItem('chat_session_id');
     document.getElementById('chat-messages').innerHTML = '<div style="text-align: center; color: #a2a2a2; padding: 40px;"><p>开始新对话</p></div>';
     document.getElementById('session-id-display').innerHTML = '💬 待创建';
     document.getElementById('session-copy-btn').style.display = 'none';
+    document.getElementById('context-btn').style.display = 'none';
     document.getElementById('compress-hint').innerHTML = '';
     loadSessions();
 }
@@ -533,12 +555,14 @@ async function sendMessage() {
     const useBM25 = document.getElementById('use-bm25').checked;
     const useHybrid = document.getElementById('use-hybrid').checked;
     const useNone = document.getElementById('use-none').checked;
-    const compressMode = document.getElementById('compress-mode').value;
+    let compressMode = document.getElementById('compress-mode').value;
     const compressCount = document.getElementById('compress-count').value;
-    // 如果是滑动窗口且设置了数量，传 "sliding_window_10" 格式
-    const finalCompressMode = (compressMode === 'sliding_window' && compressCount) 
-        ? 'sliding_window_' + compressCount 
-        : compressMode;
+    if (compressCount) {
+        if (compressMode === 'sliding_window') compressMode = 'sliding_window_' + compressCount;
+        else if (compressMode === 'token_limit') compressMode = 'token_limit_' + compressCount;
+        else if (compressMode === 'summary') compressMode = 'summary_' + compressCount;
+        else if (compressMode === 'afm') compressMode = 'afm_' + compressCount;
+    }
     const topK = parseInt(document.getElementById('rag-top-k').value) || 5;
     input.value = ''; input.disabled = true; document.getElementById('send-btn').disabled = true;
     const messagesDiv = document.getElementById('chat-messages');
@@ -551,7 +575,7 @@ async function sendMessage() {
     let fullReply = ''; let sessionId = currentSessionId; let sourcesCount = 0;
     displayedText = ''; window.typewriterQueue = ''; window.typewriterRunning = false; window.typewriterDone = false;
     try {
-        const response = await fetch(`${API_BASE}/chat/stream`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ session_id: currentSessionId, message: message, use_vector: useNone ? false : (useHybrid ? true : useVector), use_bm25: useNone ? false : (useHybrid ? true : useBM25), top_k: topK, compress_mode: finalCompressMode }) });
+        const response = await fetch(`${API_BASE}/chat/stream`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ session_id: currentSessionId, message: message, use_vector: useNone ? false : (useHybrid ? true : useVector), use_bm25: useNone ? false : (useHybrid ? true : useBM25), top_k: topK, compress_mode: compressMode }) });
         const reader = response.body.getReader(); const decoder = new TextDecoder(); let currentEvent = '';
         while (true) { const { done, value } = await reader.read(); if (done) break; const chunk = decoder.decode(value); const lines = chunk.split('\n');
             for (let i = 0; i < lines.length; i++) { const line = lines[i];
@@ -770,8 +794,17 @@ function updateCompressHint() {
 
 function updateCompressUI() {
     const mode = document.getElementById('compress-mode').value;
-    document.getElementById('compress-count-wrap').style.display = 
-        (mode === 'sliding_window') ? 'inline' : 'none';
+    const show = mode === 'sliding_window' || mode === 'token_limit' || mode === 'summary' || mode === 'afm';
+    document.getElementById('compress-count-wrap').style.display = show ? 'inline' : 'none';
+    document.getElementById('compress-count-label').textContent = 
+        mode === 'token_limit' ? '限制' :
+        mode === 'summary' ? '超过' :
+        mode === 'afm' ? '预算' : '保留';
+    document.getElementById('compress-count-unit').textContent = 
+        mode === 'token_limit' ? 'tokens' :
+        mode === 'summary' ? '条触发' :
+        mode === 'afm' ? 'tokens' : '条';
+    document.getElementById('compress-count').max = mode === 'token_limit' || mode === 'afm' ? 10000 : 100;
 }
 
 function updateCompressExp() {
@@ -846,9 +879,9 @@ function showModeDetail(mode) {
             <p style="color:#dc2626;">⚠️ 缺点：丢失重要设定信息。</p>
             <p style="color:#059669;">✅ 适用：不需要记住历史信息的场景。</p>`,
         'token_limit': `<h4 style="color:#1e40af;">Token限制模式</h4>
-            <p style="color:#475569;line-height:1.8;">控制总token数，超出时从最早的开始删除。</p>
-            <p style="color:#dc2626;">⚠️ 缺点：可能删除重要消息。</p>
-            <p style="color:#059669;">✅ 适用：需要控制API成本的场景。</p>`,
+            <p style="color:#475569;line-height:1.8;">保留前2条消息（关键设定），然后从尾部往前保留直到达到token上限。</p>
+            <p style="color:#dc2626;">⚠️ 缺点：可能删除中间消息。</p>
+            <p style="color:#059669;">✅ 适用：需要控制API成本的场景。可自定义token上限。</p>`,
         'summary': `<h4 style="color:#1e40af;">摘要压缩模式</h4>
             <p style="color:#475569;line-height:1.8;">将所有历史消息压缩成一条摘要。</p>
             <p style="color:#dc2626;">⚠️ 缺点：摘要可能丢失细节信息。</p>
@@ -861,7 +894,15 @@ function showModeDetail(mode) {
                 4️⃣ 剩余消息调用LLM生成摘要 → <span style="color:#f59e0b;font-weight:bold">摘要</span><br>
                 5️⃣ 组合: 重要 + 摘要 + 最近 → 发送给LLM
             </p>
-            <p style="color:#059669;">✅ 适用：生产环境，保护重要信息同时节省token。</p>`
+            <p style="color:#059669;">✅ 适用：生产环境，保护重要信息同时节省token。</p>`,
+        'afm': `<h4 style="color:#1e40af;">AFM自适应保真度压缩</h4>
+            <p style="color:#475569;line-height:1.8;">
+                🔹 LLM 对每条消息分三档：<br>
+                <span style="color:#059669;font-weight:bold">Full（完整保留）</span> — 关键设定、用户约束<br>
+                <span style="color:#f59e0b;font-weight:bold">Compressed（精简）</span> — 有参考价值的消息，压缩为一句话<br>
+                <span style="color:#94a3b8;font-weight:bold">Placeholder（占位）</span> — 闲聊或无关内容，显示"省略X条"
+            </p>
+            <p style="color:#059669;">✅ 比分层压缩更精细，信息保留更准确。</p>`
     };
     
     document.getElementById('mode-detail').innerHTML = details[mode] || '';

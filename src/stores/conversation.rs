@@ -10,7 +10,6 @@ use langchainrust::{
     language_models::OpenAIChat,
     schema::Message,
     core::runnables::Runnable,
-    OpenAIConfig,
 };
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions, Row};
 use std::sync::Arc;
@@ -18,10 +17,18 @@ use chrono::Utc;
 use futures_util::Stream;
 use serde::{Serialize, Deserialize};
 
+/// AFM 保真度等级
+#[derive(Debug, Clone, Copy)]
+enum FidelityLevel {
+    Full,        // 完整保留
+    Compressed,  // 精简保留
+    Placeholder, // 占位符
+}
+
+#[derive(Clone)]
 pub struct ConversationStore {
     pool: SqlitePool,
     llm: Arc<OpenAIChat>,
-    summary_llm: Arc<OpenAIChat>,
     compress_config: ConversationConfig,
 }
 
@@ -49,25 +56,11 @@ impl ConversationStore {
         
         let llm = Arc::new(OpenAIChat::new(config.to_langchain_openai_config().with_streaming(true)));
         
-        let summary_config = OpenAIConfig {
-            api_key: config.openai.api_key.clone(),
-            base_url: config.openai.base_url.clone(),
-            model: config.conversation.as_ref()
-                .map(|c| c.summary_model.clone())
-                .unwrap_or_else(|| "gpt-3.5-turbo".to_string()),
-            streaming: false,
-            temperature: Some(0.3),
-            max_tokens: Some(200),
-            ..Default::default()
-        };
-        let summary_llm = Arc::new(OpenAIChat::new(summary_config));
-        
         let compress_config = config.conversation.clone().unwrap_or_default();
         
         Ok(Self {
             pool,
             llm,
-            summary_llm,
             compress_config,
         })
     }
@@ -79,6 +72,8 @@ impl ConversationStore {
                 title TEXT NOT NULL,
                 message_count INTEGER DEFAULT 0,
                 tokens_used INTEGER DEFAULT 0,
+                compressed_until INTEGER DEFAULT 0,
+                important_context TEXT DEFAULT '',
                 time_created INTEGER NOT NULL,
                 time_updated INTEGER NOT NULL
             )"
@@ -111,6 +106,11 @@ impl ConversationStore {
             .execute(pool)
             .await
             .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        
+        sqlx::query("ALTER TABLE session ADD COLUMN compressed_until INTEGER DEFAULT 0")
+            .execute(pool).await.ok();
+        sqlx::query("ALTER TABLE session ADD COLUMN important_context TEXT DEFAULT ''")
+            .execute(pool).await.ok();
         
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_session_updated ON session(time_updated)")
             .execute(pool)
@@ -157,11 +157,12 @@ impl ConversationStore {
         let search_mode = SearchMode::from_flags(request.use_vector, request.use_bm25);
         
         let (messages, compressed, compression_info) = self.build_messages(
+            &session_id,
             history,
             request.message.clone(),
             search_mode,
             rag_sources.clone(),
-            compress_mode,
+            compress_mode.clone(),
         ).await?;
         
         let reply = self.llm.invoke(messages, None).await
@@ -172,6 +173,15 @@ impl ConversationStore {
         self.save_message(&session_id, "assistant", &reply).await?;
         
         self.update_session_stats(&session_id).await?;
+        
+        // 后台压缩并持久化（不阻塞响应）
+        let store = self.clone();
+        let sid = session_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = store.compress_and_persist(&sid, compress_mode).await {
+                tracing::warn!("压缩持久化失败: {:?}", e);
+            }
+        });
         
         Ok(ChatResponse {
             session_id,
@@ -202,6 +212,7 @@ impl ConversationStore {
         let search_mode = SearchMode::from_flags(request.use_vector, request.use_bm25);
         
         let (messages, _, _) = self.build_messages(
+            &session_id,
             history,
             request.message.clone(),
             search_mode,
@@ -222,6 +233,7 @@ impl ConversationStore {
     
     async fn build_messages(
         &self,
+        session_id: &str,
         history: Vec<ConversationMessage>,
         current_message: String,
         search_mode: SearchMode,
@@ -230,7 +242,16 @@ impl ConversationStore {
     ) -> Result<(Vec<Message>, bool, Option<String>), ConversationError> {
         let mut messages: Vec<Message> = Vec::new();
         
-        messages.push(Message::system("请用中文回答用户问题。记住用户之前告诉你的信息。"));
+        let sys_prompt = if let Ok(ctx) = self.get_important_context(session_id).await {
+            if !ctx.is_empty() {
+                format!("请用中文回答用户问题。记住用户之前告诉你的信息。\n\n【重要设定】{}", ctx)
+            } else {
+                "请用中文回答用户问题。记住用户之前告诉你的信息。".to_string()
+            }
+        } else {
+            "请用中文回答用户问题。记住用户之前告诉你的信息。".to_string()
+        };
+        messages.push(Message::system(&sys_prompt));
         
         let (compressed_history, was_compressed, compression_info) = 
             self.apply_compression(history, compress_mode).await?;
@@ -267,12 +288,13 @@ impl ConversationStore {
         match mode {
             CompressMode::SlidingWindow(n) => self.apply_sliding_window(history, n),
             CompressMode::TokenLimit(n) => self.apply_token_limit(history, n),
-            CompressMode::Summary => self.apply_summary_compression(history).await,
+            CompressMode::Summary(n) => self.apply_summary_compression(history, n).await,
             CompressMode::Layered => self.apply_layered_compression(history).await,
+            CompressMode::AdaptiveFocus(n) => self.apply_afm_compression(history, n).await,
             CompressMode::None => Ok((history, false, None)),
         }
     }
-    
+
     fn apply_sliding_window(
         &self,
         history: Vec<ConversationMessage>,
@@ -328,11 +350,11 @@ impl ConversationStore {
     async fn apply_summary_compression(
         &self,
         history: Vec<ConversationMessage>,
+        threshold_override: Option<usize>,
     ) -> Result<(Vec<ConversationMessage>, bool, Option<String>), ConversationError> {
-        let threshold = self.compress_config.compress_threshold;
         let keep_recent = self.compress_config.keep_recent_messages;
-        
-        if history.len() <= threshold {
+        let threshold = threshold_override.unwrap_or(self.compress_config.compress_threshold);
+        if history.len() <= keep_recent || history.len() <= threshold {
             return Ok((history, false, None));
         }
         
@@ -340,7 +362,20 @@ impl ConversationStore {
         let to_compress = history.iter().take(to_compress_count).cloned().collect::<Vec<_>>();
         let recent = history.into_iter().skip(to_compress_count).collect::<Vec<_>>();
         
-        let summary = self.generate_summary(&to_compress).await?;
+        // 限制每次最多传 20 条给 LLM，防止第一次压缩太久
+        let summary_batch = if to_compress.len() > 20 {
+            to_compress.iter().skip(to_compress.len() - 20).cloned().collect::<Vec<_>>()
+        } else {
+            to_compress.clone()
+        };
+        let summary = match self.generate_summary(&summary_batch).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("摘要生成失败，降级为简单截断: {:?}", e);
+                let recent = recent.clone();
+                return Ok((recent, true, Some(format!("摘要生成失败，保留最近 {} 条", keep_recent))));
+            }
+        };
         let summary_tokens = estimate_tokens(&summary);
         
         let summary_msg = ConversationMessage {
@@ -357,17 +392,159 @@ impl ConversationStore {
         let info = format!("摘要压缩: {} 条压缩为摘要，保留最近 {} 条", to_compress_count, keep_recent);
         Ok((result, true, Some(info)))
     }
+
+    /// 压缩并持久化到 SQLite：删掉旧消息，插入摘要消息
+    /// 下次 get_history 直接读到压缩后的数据，不再重复压缩
+    pub async fn compress_and_persist(
+        &self,
+        session_id: &str,
+        mode: CompressMode,
+    ) -> Result<(), ConversationError> {
+        let compressed_until: i64 = sqlx::query(
+            "SELECT COALESCE(compressed_until, 0) FROM session WHERE id = ?"
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ConversationError::SqliteError(e.to_string()))?
+        .map(|r| r.get::<i64, _>(0))
+        .unwrap_or(0);
+
+        // 只查未压缩的消息（不含 summary）
+        let uncomprised = sqlx::query(
+            "SELECT id, session_id, role, content, tokens, time_created 
+             FROM message WHERE session_id = ? AND time_created > ? AND role != 'summary'
+             ORDER BY time_created"
+        )
+        .bind(session_id)
+        .bind(compressed_until)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ConversationError::SqliteError(e.to_string()))?
+        .into_iter()
+        .map(|row| ConversationMessage {
+            id: row.get::<String, _>(0),
+            session_id: row.get::<String, _>(1),
+            role: row.get::<String, _>(2),
+            content: row.get::<String, _>(3),
+            tokens: row.get::<i64, _>(4),
+            time_created: row.get::<i64, _>(5),
+        })
+        .collect::<Vec<_>>();
+
+        tracing::info!("compress_and_persist: session={}, uncomprised={}, compressed_until={}, mode={:?}",
+            session_id, uncomprised.len(), compressed_until, mode);
+
+        if uncomprised.len() < 2 {
+            return Ok(());
+        }
+
+        // 分层压缩：提取重要消息的关键信息
+        if mode == CompressMode::Layered || mode == CompressMode::AdaptiveFocus(None) {
+            let keywords = &self.compress_config.important_keywords;
+            let important: Vec<ConversationMessage> = uncomprised.iter()
+                .filter(|m| keywords.iter().any(|k| m.content.contains(k)))
+                .cloned()
+                .collect();
+            if !important.is_empty() {
+                self.extract_and_save_important_context(session_id, &important).await.ok();
+            }
+        }
+
+        let new_until = uncomprised.iter().map(|m| m.time_created).max().unwrap_or(0);
+        let (compressed, was_compressed, info) = self.apply_compression(uncomprised, mode).await?;
+        tracing::info!("compress_and_persist: was_compressed={}, info={:?}", was_compressed, info);
+        if !was_compressed {
+            return Ok(());
+        }
+
+        // 只插入新生成的摘要，不删旧消息
+        for msg in &compressed {
+            if msg.role == "summary" {
+                let exists = sqlx::query("SELECT COUNT(*) FROM message WHERE id = ?")
+                    .bind(&msg.id)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|e| ConversationError::SqliteError(e.to_string()))?
+                    .get::<i64, _>(0) > 0;
+                if !exists {
+                    sqlx::query(
+                        "INSERT INTO message (id, session_id, role, content, tokens, time_created) VALUES (?, ?, ?, ?, ?, ?)"
+                    )
+                    .bind(&msg.id).bind(session_id).bind(&msg.role).bind(&msg.content).bind(msg.tokens).bind(msg.time_created)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+                }
+            }
+        }
+
+        // 更新压缩进度
+        sqlx::query("UPDATE session SET compressed_until = ? WHERE id = ?")
+            .bind(new_until).bind(session_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+
+        self.update_session_stats(session_id).await?;
+        Ok(())
+    }
+
+    /// 读取重要上下文
+    pub async fn get_important_context(&self, session_id: &str) -> Result<String, ConversationError> {
+        let row = sqlx::query("SELECT COALESCE(important_context, '') FROM session WHERE id = ?")
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        Ok(row.map(|r| r.get::<String, _>(0)).unwrap_or_default())
+    }
+
+    /// 写入重要上下文
+    pub async fn set_important_context(&self, session_id: &str, context: &str) -> Result<(), ConversationError> {
+        sqlx::query("UPDATE session SET important_context = ? WHERE id = ?")
+            .bind(context).bind(session_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 从重要消息中提取关键信息，更新 important_context
+    pub async fn extract_and_save_important_context(
+        &self,
+        session_id: &str,
+        important_messages: &[ConversationMessage],
+    ) -> Result<(), ConversationError> {
+        if important_messages.is_empty() {
+            return Ok(());
+        }
+        let text = important_messages.iter()
+            .map(|m| format!("{}(用户): {}", m.time_created, m.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prompt = format!("从以下对话中提取关键设定和重要信息（50字以内），只输出要点：\n\n{}", text);
+        match self.llm.invoke(vec![Message::human(&prompt)], None).await {
+            Ok(result) => {
+                let old = self.get_important_context(session_id).await?;
+                let new = if old.is_empty() { result.content } else { format!("{}；{}", old, result.content) };
+                self.set_important_context(session_id, &new).await?;
+            }
+            Err(e) => tracing::warn!("提取重要上下文失败: {:?}", e),
+        }
+        Ok(())
+    }
     
     async fn apply_layered_compression(
         &self,
         history: Vec<ConversationMessage>,
     ) -> Result<(Vec<ConversationMessage>, bool, Option<String>), ConversationError> {
         let max_messages = self.compress_config.max_history_messages;
-        let threshold = self.compress_config.compress_threshold;
         let keep_recent = self.compress_config.keep_recent_messages;
+        let threshold = self.compress_config.compress_threshold;
         let keywords = &self.compress_config.important_keywords;
         
-        if history.len() <= threshold {
+        if history.len() <= keep_recent || history.len() <= threshold {
             return Ok((history, false, None));
         }
         
@@ -387,10 +564,23 @@ impl ConversationStore {
             .cloned()
             .collect();
         
-        let summary = if to_compress.len() > 3 {
-            self.generate_summary(&to_compress).await?
+        // 限制每次最多传 20 条给 LLM
+        let summary_batch = if to_compress.len() > 20 {
+            to_compress.iter().skip(to_compress.len() - 20).cloned().collect::<Vec<_>>()
         } else {
-            to_compress.iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("\n")
+            to_compress.clone()
+        };
+        
+        let summary = if summary_batch.len() > 3 {
+            match self.generate_summary(&summary_batch).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("分层压缩摘要生成失败，降级: {:?}", e);
+                    format!("[历史摘要: 省略了 {} 条消息]", to_compress.len())
+                }
+            }
+        } else {
+            summary_batch.iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("\n")
         };
         let summary_tokens = estimate_tokens(&summary) as i64;
         
@@ -417,7 +607,137 @@ impl ConversationStore {
         let info = format!("分层压缩: 重要 {} 条 + 摘要 + 最近 {} 条", important_ids.len(), keep_recent);
         Ok((result, true, Some(info)))
     }
-    
+
+    /// AFM 自适应保真度压缩
+    /// 每条消息分为三档：Full（完整保留）/ Compressed（LLM精简）/ Placeholder（一行占位）
+    async fn apply_afm_compression(
+        &self,
+        history: Vec<ConversationMessage>,
+        budget_override: Option<usize>,
+    ) -> Result<(Vec<ConversationMessage>, bool, Option<String>), ConversationError> {
+        let keep_recent = self.compress_config.keep_recent_messages;
+        let threshold = self.compress_config.compress_threshold;
+        if history.len() <= keep_recent || history.len() <= threshold {
+            return Ok((history, false, None));
+        }
+
+        // 分离最近消息（完整保留）
+        let recent: Vec<ConversationMessage> = history.iter()
+            .rev().take(keep_recent).rev().cloned().collect();
+        let recent_ids: Vec<String> = recent.iter().map(|m| m.id.clone()).collect();
+
+        // 剩余消息按保真度压缩
+        let to_classify: Vec<&ConversationMessage> = history.iter()
+            .filter(|m| !recent_ids.contains(&m.id))
+            .collect();
+
+        let budget = budget_override.unwrap_or(self.compress_config.max_tokens);
+
+        // 调 LLM 对每条消息做三档分类
+        let classification = self.classify_messages(&to_classify).await;
+
+        let mut full_msgs: Vec<ConversationMessage> = Vec::new();
+        let mut compressed_msgs: Vec<String> = Vec::new();
+        let mut token_count = 0;
+        let mut placeholder_count = 0;
+
+        for (msg, cls) in to_classify.into_iter().zip(classification.iter()) {
+            match cls {
+                FidelityLevel::Full => {
+                    full_msgs.push(msg.clone());
+                    token_count += msg.tokens as usize;
+                }
+                FidelityLevel::Compressed => {
+                    let condensed = self.condense_message(msg).await;
+                    let t = estimate_tokens(&condensed);
+                    if token_count + t <= budget {
+                        compressed_msgs.push(condensed);
+                        token_count += t;
+                    } else {
+                        placeholder_count += 1;
+                    }
+                }
+                FidelityLevel::Placeholder => {
+                    placeholder_count += 1;
+                }
+            }
+        }
+
+        let placeholder_msg = if placeholder_count > 0 {
+            vec![ConversationMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                session_id: "".to_string(),
+                role: "summary".to_string(),
+                content: format!("[省略 {} 条低优先级消息]", placeholder_count),
+                tokens: 5,
+                time_created: Utc::now().timestamp_millis(),
+            }]
+        } else {
+            vec![]
+        };
+
+        let full_count = full_msgs.len();
+        let compressed_count = compressed_msgs.len();
+        let mut result: Vec<ConversationMessage> = Vec::new();
+        result.append(&mut full_msgs);
+        for c in compressed_msgs.drain(..) {
+            let t = estimate_tokens(&c) as i64;
+            result.push(ConversationMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                session_id: "".to_string(),
+                role: "summary".to_string(),
+                content: c,
+                tokens: t,
+                time_created: Utc::now().timestamp_millis(),
+            });
+        }
+        result.extend(placeholder_msg);
+        result.extend(recent);
+
+        let info = format!("AFM: {} 完整保留, {} 精简, {} 占位, {} 最近",
+            full_count, compressed_count, placeholder_count, keep_recent);
+        Ok((result, true, Some(info)))
+    }
+
+    /// LLM 对一批消息做三档保真度分类
+    async fn classify_messages(&self, messages: &[&ConversationMessage]) -> Vec<FidelityLevel> {
+        if messages.is_empty() { return vec![]; }
+        let text = messages.iter()
+            .enumerate()
+            .map(|(i, m)| format!("[{}] {}: {}", i, m.role, m.content.chars().take(100).collect::<String>()))
+            .collect::<Vec<_>>().join("\n");
+        let prompt = format!(
+            "以下是一段对话的多条消息。请对每条消息分类：\n\
+             F=完整保留（含关键设定、用户约束、人物信息）\n\
+             C=精简保留（有参考价值但非关键）\n\
+             P=占位符（闲聊或无关内容）\n\n\
+             按顺序输出每条的分类（F/C/P），逗号分隔。\n\n{}", text);
+        match self.llm.invoke(vec![Message::human(&prompt)], None).await {
+            Ok(r) => {
+                let parts: Vec<&str> = r.content.trim().split(|c| c == ',' || c == '、')
+                    .map(|s| s.trim()).collect();
+                messages.iter().enumerate().map(|(i, _)| {
+                    match parts.get(i).copied().unwrap_or("P") {
+                        "F" | "f" => FidelityLevel::Full,
+                        "C" | "c" => FidelityLevel::Compressed,
+                        _ => FidelityLevel::Placeholder,
+                    }
+                }).collect()
+            }
+            Err(_) => vec![FidelityLevel::Placeholder; messages.len()],
+        }
+    }
+
+    /// 将单条消息精简为一句话
+    async fn condense_message(&self, msg: &ConversationMessage) -> String {
+        let prompt = format!("用一句话总结这条消息（20字内）：{}", msg.content.chars().take(200).collect::<String>());
+        if let Ok(r) = self.llm.invoke(vec![Message::human(&prompt)], None).await {
+            r.content.chars().take(80).collect()
+        } else {
+            msg.content.chars().take(40).collect()
+        }
+    }
+
     async fn generate_summary(
         &self,
         messages: &[ConversationMessage],
@@ -428,12 +748,14 @@ impl ConversationStore {
         
         let prompt = format!("请将以下对话压缩成摘要（100字内），保留关键设定：\n\n{}", history_text);
         
-        let summary = self.summary_llm.invoke(vec![Message::human(&prompt)], None).await
+        let summary = self.llm.invoke(vec![Message::human(&prompt)], None).await
             .map_err(|e| ConversationError::LLMError(e.to_string()))?
             .content;
         
         Ok(summary)
     }
+
+
     
     async fn session_exists(&self, session_id: &str) -> Result<bool, ConversationError> {
         let row = sqlx::query("SELECT COUNT(*) FROM session WHERE id = ?")
@@ -545,11 +867,24 @@ impl ConversationStore {
     }
     
     pub async fn get_history(&self, session_id: &str) -> Result<Vec<ConversationMessage>, ConversationError> {
-        let rows = sqlx::query(
-            "SELECT id, session_id, role, content, tokens, time_created 
-             FROM message WHERE session_id = ? ORDER BY time_created"
+        let compressed_until: i64 = sqlx::query(
+            "SELECT COALESCE(compressed_until, 0) FROM session WHERE id = ?"
         )
         .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ConversationError::SqliteError(e.to_string()))?
+        .map(|r| r.get::<i64, _>(0))
+        .unwrap_or(0);
+        
+        let rows = sqlx::query(
+            "SELECT id, session_id, role, content, tokens, time_created 
+             FROM message 
+             WHERE session_id = ? AND (time_created > ? OR role = 'summary')
+             ORDER BY time_created"
+        )
+        .bind(session_id)
+        .bind(compressed_until)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
@@ -628,6 +963,7 @@ impl ConversationStore {
             CompressModeInfo { name: "token_limit".to_string(), label: "Token限制".to_string(), description: "控制总token数量".to_string() },
             CompressModeInfo { name: "summary".to_string(), label: "摘要压缩".to_string(), description: "旧消息压缩为摘要".to_string() },
             CompressModeInfo { name: "layered".to_string(), label: "分层压缩".to_string(), description: "保护重要+摘要+最近".to_string() },
+            CompressModeInfo { name: "afm".to_string(), label: "AFM自适应".to_string(), description: "LLM分类+F量完整保留+C精简+P占位".to_string() },
         ]
     }
     

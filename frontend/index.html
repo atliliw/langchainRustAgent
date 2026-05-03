@@ -118,19 +118,21 @@
                         <select id="compress-mode" onchange="updateCompressUI()" style="padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
                             <option value="none">不压缩（完整历史）</option>
                             <option value="sliding_window">滑动窗口</option>
-                            <option value="token_limit">Token限制（保护关键设定）</option>
+                            <option value="token_limit">Token限制</option>
                             <option value="summary">摘要压缩（旧消息压缩为摘要）</option>
                             <option value="layered">分层压缩（重要+摘要+最近）</option>
+                            <option value="afm">AFM自适应（LLM分类+三档保真度）</option>
                         </select>
                         <span id="compress-count-wrap" style="display:none;margin-left:10px;">
-                            <span style="color:#666;font-size:13px;">保留</span>
-                            <input type="number" id="compress-count" value="10" min="1" max="100" style="width:50px;padding:5px;border:1px solid #ddd;border-radius:4px;font-size:13px;">
-                            <span style="color:#666;font-size:13px;">条</span>
+                            <span id="compress-count-label" style="color:#666;font-size:13px;">保留</span>
+                            <input type="number" id="compress-count" value="10" min="1" max="10000" style="width:60px;padding:5px;border:1px solid #ddd;border-radius:4px;font-size:13px;">
+                            <span id="compress-count-unit" style="color:#666;font-size:13px;">条</span>
                         </span>
-                        <span id="compress-hint" style="color: #64748b; font-size: 12px; font-weight:bold;"></span>
-                        <span style="margin-left: auto; display:flex; align-items:center; gap:8px;">
+                        <span style="margin-left: auto; display:flex; align-items:center; gap:12px;">
+                            <span id="compress-hint" style="color: #64748b; font-size: 12px; font-weight:bold;"></span>
                             <span id="session-id-display" style="font-size:11px;color:#1e40af;font-family:monospace;font-weight:bold;white-space:nowrap;">💬 待创建</span>
                             <button id="session-copy-btn" onclick="copyCurrentSessionId()" style="display:none;background:#3b82f6;color:white;border:none;border-radius:4px;font-size:10px;padding:2px 8px;cursor:pointer;">复制ID</button>
+                            <button id="context-btn" onclick="showContextEditor()" style="display:none;background:#10b981;color:white;border:none;border-radius:4px;font-size:10px;padding:2px 8px;cursor:pointer;">📋 上下文</button>
                         </span>
                     </div>
                     <div class="chat-messages" id="chat-messages">
@@ -313,7 +315,7 @@
                 </div>
                 <div class="mode-card" onclick="showModeDetail('token_limit')">
                     <div class="mode-title">Token限制</div>
-                    <div class="mode-desc">控制token数</div>
+                    <div class="mode-desc">保留前2条+尾部，限制token</div>
                 </div>
                 <div class="mode-card" onclick="showModeDetail('summary')">
                     <div class="mode-title">摘要压缩</div>
@@ -322,6 +324,10 @@
                 <div class="mode-card active" onclick="showModeDetail('layered')">
                     <div class="mode-title">分层压缩</div>
                     <div class="mode-desc">重要+摘要+最近</div>
+                </div>
+                <div class="mode-card" onclick="showModeDetail('afm')">
+                    <div class="mode-title">AFM自适应</div>
+                    <div class="mode-desc">LLM三档保真度</div>
                 </div>
             </div>
             

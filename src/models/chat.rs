@@ -32,10 +32,11 @@ fn default_compress_mode() -> String { "none".to_string() }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CompressMode {
     None,                              // 不压缩
-    SlidingWindow(Option<usize>),       // 滑动窗口：保留最近 N 条，None=使用默认
+    SlidingWindow(Option<usize>),       // 滑动窗口：保留最近 N 条
     TokenLimit(Option<usize>),          // Token 限制
-    Summary,                            // 摘要压缩
-    Layered,                            // 分层压缩（推荐）
+    Summary(Option<usize>),             // 摘要压缩
+    Layered,                            // 分层压缩（重要+摘要+最近）
+    AdaptiveFocus(Option<usize>),       // AFM 自适应保真度（LLM 重要性评分）
 }
 
 impl CompressMode {
@@ -43,16 +44,23 @@ impl CompressMode {
         match s {
             "none" => CompressMode::None,
             "sliding_window" => CompressMode::SlidingWindow(None),
-            "summary" => CompressMode::Summary,
+            "summary" => CompressMode::Summary(None),
             "layered" => CompressMode::Layered,
+            "afm" | "adaptive_focus" => CompressMode::AdaptiveFocus(None),
             _ => {
-                // 支持 sliding_window_5, sliding_window_50 等格式
                 if s.starts_with("sliding_window_") {
                     let num = s.trim_start_matches("sliding_window_").parse().ok();
                     CompressMode::SlidingWindow(num)
                 } else if s.starts_with("token_limit_") {
                     let num = s.trim_start_matches("token_limit_").parse().ok();
                     CompressMode::TokenLimit(num)
+                } else if s.starts_with("summary_") {
+                    let num = s.trim_start_matches("summary_").parse().ok();
+                    CompressMode::Summary(num)
+                } else if s.starts_with("afm_") || s.starts_with("adaptive_focus_") {
+                    let key = if s.starts_with("afm_") { "afm_" } else { "adaptive_focus_" };
+                    let num = s.trim_start_matches(key).parse().ok();
+                    CompressMode::AdaptiveFocus(num)
                 } else {
                     CompressMode::None
                 }
