@@ -37,6 +37,7 @@ pub enum CompressMode {
     Summary(Option<usize>),             // 摘要压缩
     Layered,                            // 分层压缩（重要+摘要+最近）
     AdaptiveFocus(Option<usize>),       // AFM 自适应保真度（LLM 重要性评分）
+    TopicSegment,                        // 话题分段压缩（按话题切分，独立摘要）
 }
 
 impl CompressMode {
@@ -47,6 +48,7 @@ impl CompressMode {
             "summary" => CompressMode::Summary(None),
             "layered" => CompressMode::Layered,
             "afm" | "adaptive_focus" => CompressMode::AdaptiveFocus(None),
+            "topic" | "topic_segment" | "episodic" => CompressMode::TopicSegment,
             _ => {
                 if s.starts_with("sliding_window_") {
                     let num = s.trim_start_matches("sliding_window_").parse().ok();

@@ -116,6 +116,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         
         .route("/api/langgraph/stream", axum::routing::post(langgraph::run_langgraph_stream))
         // 流式执行演示
+        
+        .route("/api/langgraph/structure", axum::routing::post(langgraph::get_langgraph_structure))
+        // 获取图结构（含 Mermaid 可视化语法）
 
         // ────────────────────── 文档管理 ──────────────────────
         .route("/api/documents", axum::routing::get(document::list_documents))

@@ -401,6 +401,14 @@ impl ApiService {
         service.run_stream_demo(input).await.map_err(|e| ApiError::SearchError(e.to_string()))
     }
     
+    pub fn get_langgraph_structure(mode: String) -> Result<LangGraphStructureResponse, ApiError> {
+        let mermaid = LangGraphDemoService::get_graph_mermaid(&mode)
+            .map_err(|e| ApiError::SearchError(e.to_string()))?;
+        let structure = LangGraphDemoService::get_graph_structure(&mode)
+            .map_err(|e| ApiError::SearchError(e.to_string()))?;
+        Ok(LangGraphStructureResponse { mode, mermaid, structure })
+    }
+    
     /// ──────────────────── API统计 ────────────────────
     
     pub async fn get_api_stats(&self) -> Result<ApiStatsSummary, ApiError> {

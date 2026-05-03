@@ -794,7 +794,7 @@ function updateCompressHint() {
 
 function updateCompressUI() {
     const mode = document.getElementById('compress-mode').value;
-    const show = mode === 'sliding_window' || mode === 'token_limit' || mode === 'summary' || mode === 'afm';
+    const show = mode === 'sliding_window' || mode === 'token_limit' || mode === 'summary' || mode === 'afm' || mode === 'topic';
     document.getElementById('compress-count-wrap').style.display = show ? 'inline' : 'none';
     document.getElementById('compress-count-label').textContent = 
         mode === 'token_limit' ? '限制' :
@@ -902,7 +902,19 @@ function showModeDetail(mode) {
                 <span style="color:#f59e0b;font-weight:bold">Compressed（精简）</span> — 有参考价值的消息，压缩为一句话<br>
                 <span style="color:#94a3b8;font-weight:bold">Placeholder（占位）</span> — 闲聊或无关内容，显示"省略X条"
             </p>
-            <p style="color:#059669;">✅ 比分层压缩更精细，信息保留更准确。</p>`
+            <p style="color:#059669;">✅ 比分层压缩更精细，信息保留更准确。</p>`,
+        'topic': `<h4 style="color:#1e40af;">话题分段压缩</h4>
+            <p style="color:#475569;line-height:1.8;">
+                🔹 LLM 检测话题切换点<br>
+                🔹 每一段独立生成摘要<br>
+                🔹 保留最近对话完整<br>
+                🔹 示例：<br>
+                <span style="color:#94a3b8;">[话题] "用户询问Rust的定义和用途"</span><br>
+                <span style="color:#94a3b8;">[话题] "用户请求AI扮演电子小狗，取名小爱同学"</span><br>
+                <span style="color:#94a3b8;">[话题] "讨论苹果和西瓜的营养价值"</span><br>
+                <span style="color:#1e293b;">最近消息...</span>
+            </p>
+            <p style="color:#059669;">✅ 长对话中按话题组织，比单一摘要更清晰。</p>`
     };
     
     document.getElementById('mode-detail').innerHTML = details[mode] || '';
@@ -918,41 +930,113 @@ function showResult(elementId, type, message) {
 function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
 function formatTime(timestamp) { const date = new Date(timestamp); return date.toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }
 
+let _selectedMode = null;
+
 async function loadLangGraphInfo() {
     try {
         const res = await fetch(`${API_BASE}/langgraph/info`);
         const info = await res.json();
-        document.getElementById('graph-structure').textContent = JSON.stringify(info, null, 2);
-    } catch (e) { document.getElementById('graph-structure').textContent = `加载失败: ${e.message}`; }
+        if (info.parallel_demo) {
+            document.getElementById('langgraph-action-bar').querySelector('span').textContent = '点击上方按钮查看图结构';
+        }
+    } catch (e) { /* ignore */ }
 }
 
-async function runParallelDemo() {
+async function showLangGraphStructure(mode) {
+    _selectedMode = mode;
     const input = document.getElementById('langgraph-input').value || '测试输入';
-    showResult('langgraph-results', 'loading', '正在执行并行任务...');
+    const container = document.getElementById('mermaid-container');
+    const viz = document.getElementById('langgraph-viz');
+    const actionBar = document.getElementById('langgraph-action-bar');
+    const title = document.getElementById('graph-title');
+    const desc = document.getElementById('graph-desc');
+
+    const modeNames = { parallel: '并行执行', conditional: '条件路由', stream: '流式执行' };
+    const modeDescs = {
+        parallel: 'FanOut → 3个并行任务同时跑，总耗时≈最慢任务',
+        conditional: '根据输入长度(&lt;10)动态选择处理路径',
+        stream: 'step1→step2→step3 逐步推送执行事件'
+    };
+
+    title.textContent = `📐 ${modeNames[mode]} - 图结构`;
+    desc.textContent = modeDescs[mode] || '';
+    container.textContent = '加载中...';
+    viz.style.display = 'block';
+
     try {
-        const res = await fetch(`${API_BASE}/langgraph/parallel`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({input}) });
+        const res = await fetch(`${API_BASE}/langgraph/structure`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode })
+        });
         const data = await res.json();
-        document.getElementById('langgraph-results').innerHTML = `<h3 style="color: #e94560;">并行执行结果</h3><div style="background: rgba(255,255,255,0.05); padding: 15px; border-radius: 8px;"><p><strong>输入：</strong>${escapeHtml(data.input)}</p><p><strong>合并结果：</strong>${escapeHtml(data.merged_result)}</p><p><strong>总耗时：</strong>${data.total_time_ms}ms</p><p><strong>时间节省：</strong>${data.time_saved_percent.toFixed(1)}%</p><h4 style="margin-top: 15px;">并行任务结果：</h4><ul>${data.parallel_tasks.map(t => `<li>${t.task_name}: ${t.result} (${t.duration_ms}ms)</li>`).join('')}</ul></div>`;
-    } catch (e) { showResult('langgraph-results', 'error', `执行失败: ${e.message}`); }
+
+        container.innerHTML = data.mermaid;
+        await mermaid.run({ nodes: [container] });
+
+        document.getElementById('btn-run-demo').style.display = 'inline-block';
+        document.getElementById('selected-mode-display').textContent = `当前模式: ${modeNames[mode]} | 输入: "${input}"`;
+    } catch (e) {
+        container.innerHTML = `<div style="color: #e94560; text-align: center; padding: 20px;">加载失败: ${e.message}</div>`;
+    }
 }
 
-async function runConditionalDemo() {
-    const input = document.getElementById('langgraph-input').value || '测试';
-    showResult('langgraph-results', 'loading', '正在执行条件路由...');
-    try {
-        const res = await fetch(`${API_BASE}/langgraph/conditional`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({input}) });
-        const data = await res.json();
-        document.getElementById('langgraph-results').innerHTML = `<h3 style="color: #c73e54;">条件路由结果</h3><div style="background: rgba(255,255,255,0.05); padding: 15px; border-radius: 8px;"><p><strong>输入：</strong>${escapeHtml(data.input)} (长度: ${data.input.length})</p><p><strong>路由决策：</strong>${escapeHtml(data.route_decision)}</p><p><strong>执行路径：</strong>${escapeHtml(data.path_taken)}</p><p><strong>输出：</strong>${escapeHtml(data.output)}</p><h4 style="margin-top: 15px;">执行步骤：</h4><ol>${data.steps.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ol></div>`;
-    } catch (e) { showResult('langgraph-results', 'error', `执行失败: ${e.message}`); }
-}
-
-async function runStreamDemo() {
+async function runSelectedDemo() {
+    if (!_selectedMode) return;
     const input = document.getElementById('langgraph-input').value || '测试输入';
-    showResult('langgraph-results', 'loading', '正在执行流式演示...');
+    const results = document.getElementById('langgraph-results');
+
+    const modeNames = { parallel: '并行执行', conditional: '条件路由', stream: '流式执行' };
+    const modeColors = { parallel: '#667eea', conditional: '#f5576c', stream: '#4facfe' };
+
+    showResult('langgraph-results', 'loading', `正在执行${modeNames[_selectedMode]}...`);
+
     try {
-        const res = await fetch(`${API_BASE}/langgraph/stream`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({input}) });
+        const res = await fetch(`${API_BASE}/langgraph/${_selectedMode}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ input })
+        });
         const data = await res.json();
-        document.getElementById('langgraph-results').innerHTML = `<h3 style="color: #4caf50;">流式执行事件</h3><div style="background: rgba(255,255,255,0.05); padding: 15px; border-radius: 8px;"><p><strong>事件数量：</strong>${data.length}</p><table style="width: 100%; margin-top: 15px;"><thead><tr style="background: rgba(255,255,255,0.1);"><th style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">节点</th><th style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">事件类型</th><th style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">时间(ms)</th></tr></thead><tbody>${data.map(e => `<tr><td style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(e.node_name)}</td><td style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(e.event_type)}</td><td style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">${e.timestamp_ms}</td></tr>`).join('')}</tbody></table></div>`;
+
+        let html = `<h3 style="color: ${modeColors[_selectedMode]};">${modeNames[_selectedMode]}结果</h3>`;
+
+        if (_selectedMode === 'parallel') {
+            html += `<div style="background: rgba(255,255,255,0.05); padding: 15px; border-radius: 8px;">
+                <p><strong>输入：</strong>${escapeHtml(data.input)}</p>
+                <p><strong>合并结果：</strong>${escapeHtml(data.merged_result)}</p>
+                <p><strong>总耗时：</strong>${data.total_time_ms}ms</p>
+                <p><strong>节省时间：</strong>${data.time_saved_percent.toFixed(1)}%</p>
+                <h4 style="margin-top: 15px;">并行任务：</h4>
+                <ul>${data.parallel_tasks.map(t => `<li>${t.task_name}: ${t.result} (${t.duration_ms}ms)</li>`).join('')}</ul>
+            </div>`;
+        } else if (_selectedMode === 'conditional') {
+            html += `<div style="background: rgba(255,255,255,0.05); padding: 15px; border-radius: 8px;">
+                <p><strong>输入：</strong>${escapeHtml(data.input)} (长度: ${data.input.length})</p>
+                <p><strong>路由决策：</strong>${escapeHtml(data.route_decision)}</p>
+                <p><strong>执行路径：</strong>${escapeHtml(data.path_taken)}</p>
+                <p><strong>输出：</strong>${escapeHtml(data.output)}</p>
+                <h4 style="margin-top: 15px;">执行步骤：</h4>
+                <ol>${data.steps.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ol>
+            </div>`;
+        } else if (_selectedMode === 'stream') {
+            html += `<div style="background: rgba(255,255,255,0.05); padding: 15px; border-radius: 8px;">
+                <p><strong>事件数量：</strong>${data.length}</p>
+                <table style="width: 100%; margin-top: 15px;">
+                    <thead><tr style="background: rgba(255,255,255,0.1);">
+                        <th style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">节点</th>
+                        <th style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">事件类型</th>
+                        <th style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">时间(ms)</th>
+                    </tr></thead>
+                    <tbody>${data.map(e => `<tr>
+                        <td style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(e.node_name)}</td>
+                        <td style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">${escapeHtml(e.event_type)}</td>
+                        <td style="padding: 8px; border: 1px solid rgba(255,255,255,0.1);">${e.timestamp_ms}</td>
+                    </tr>`).join('')}</tbody>
+                </table>
+            </div>`;
+        }
+        results.innerHTML = html;
     } catch (e) { showResult('langgraph-results', 'error', `执行失败: ${e.message}`); }
 }
 

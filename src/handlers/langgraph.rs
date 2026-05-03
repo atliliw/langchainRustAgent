@@ -52,3 +52,14 @@ pub async fn run_langgraph_stream(
     let result = crate::services::ApiService::run_langgraph_stream(request.input).await?;
     Ok(Json(result))
 }
+
+/// 获取图结构（含 Mermaid 可视化语法）
+/// POST /api/langgraph/structure
+/// 请求: { mode: "parallel" | "conditional" | "stream" }
+/// 返回: { mode, mermaid, structure }
+pub async fn get_langgraph_structure(
+    Json(request): Json<LangGraphStructureRequest>,
+) -> Result<Json<LangGraphStructureResponse>, ApiErrorResponse> {
+    let result = crate::services::ApiService::get_langgraph_structure(request.mode)?;
+    Ok(Json(result))
+}

@@ -122,6 +122,7 @@
                             <option value="summary">摘要压缩（旧消息压缩为摘要）</option>
                             <option value="layered">分层压缩（重要+摘要+最近）</option>
                             <option value="afm">AFM自适应（LLM分类+三档保真度）</option>
+                            <option value="topic">话题分段（LLM切分+每段独立摘要）</option>
                         </select>
                         <span id="compress-count-wrap" style="display:none;margin-left:10px;">
                             <span id="compress-count-label" style="color:#666;font-size:13px;">保留</span>
@@ -155,20 +156,27 @@
         </div>
         
         <div id="langgraph-tab" class="card hidden">
-            <h2>LangGraph 多任务并行演示</h2>
-            <p style="color: #666; margin-bottom: 15px;">展示 StateGraph、并行执行(FanOut)、条件路由、流式事件</p>
-            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px;">
-                <button class="btn" onclick="runParallelDemo()">并行执行演示</button>
-                <button class="btn" onclick="runConditionalDemo()">条件路由演示</button>
-                <button class="btn" onclick="runStreamDemo()">流式执行演示</button>
-            </div>
+            <h2>🔗 LangGraph 任务编排可视化</h2>
+            <p style="color: #666; margin-bottom: 15px;">输入一个任务，查看它的图结构拆解，然后选择执行模式</p>
             <div style="margin-bottom: 15px;">
-                <label>输入文本：</label>
+                <label>输入任务：</label>
                 <input type="text" id="langgraph-input" value="测试输入" style="width: 300px; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
             </div>
-            <div id="langgraph-info" style="background: #f8f9ff; padding: 15px; border-radius: 8px; margin-bottom: 15px;">
-                <h4 style="margin-bottom: 10px;">图结构信息</h4>
-                <pre id="graph-structure" style="font-size: 12px; white-space: pre-wrap;"></pre>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px;">
+                <button class="btn" onclick="showLangGraphStructure('parallel')" style="background: linear-gradient(135deg, #667eea, #764ba2);">🔀 并行执行</button>
+                <button class="btn" onclick="showLangGraphStructure('conditional')" style="background: linear-gradient(135deg, #f093fb, #f5576c);">🔀 条件路由</button>
+                <button class="btn" onclick="showLangGraphStructure('stream')" style="background: linear-gradient(135deg, #4facfe, #00f2fe);">▶️ 流式执行</button>
+            </div>
+            <div id="langgraph-viz" style="background: #ffffff; border: 2px solid #e2e8f0; border-radius: 12px; padding: 20px; margin-bottom: 15px; display: none;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                    <h4 id="graph-title" style="margin: 0; color: #1e40af;">图结构</h4>
+                    <span id="graph-desc" style="color: #64748b; font-size: 13px;"></span>
+                </div>
+                <div id="mermaid-container" class="mermaid" style="text-align: center;"></div>
+            </div>
+            <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;" id="langgraph-action-bar">
+                <button class="btn" id="btn-run-demo" onclick="runSelectedDemo()" style="display: none; background: #10b981;">▶ 执行此图</button>
+                <span id="selected-mode-display" style="color: #64748b; font-size: 13px; align-self: center;"></span>
             </div>
             <div id="langgraph-results"></div>
         </div>
@@ -329,6 +337,10 @@
                     <div class="mode-title">AFM自适应</div>
                     <div class="mode-desc">LLM三档保真度</div>
                 </div>
+                <div class="mode-card" onclick="showModeDetail('topic')">
+                    <div class="mode-title">话题分段</div>
+                    <div class="mode-desc">LLM按话题切分</div>
+                </div>
             </div>
             
             <div id="mode-detail" style="background: #eff6ff; padding: 20px; border-radius: 12px; margin-top: 15px;">
@@ -368,5 +380,7 @@
     <script src="js/app.js?v=2"></script>
     <script src="js/aggregate.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>mermaid.initialize({ startOnLoad: false, theme: 'default', flowchart: { useMaxWidth: true, htmlLabels: true } });</script>
 </body>
 </html>

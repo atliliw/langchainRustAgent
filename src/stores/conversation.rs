@@ -291,6 +291,7 @@ impl ConversationStore {
             CompressMode::Summary(n) => self.apply_summary_compression(history, n).await,
             CompressMode::Layered => self.apply_layered_compression(history).await,
             CompressMode::AdaptiveFocus(n) => self.apply_afm_compression(history, n).await,
+            CompressMode::TopicSegment => self.apply_topic_compression(history).await,
             CompressMode::None => Ok((history, false, None)),
         }
     }
@@ -440,7 +441,8 @@ impl ConversationStore {
         }
 
         // 分层压缩：提取重要消息的关键信息
-        if mode == CompressMode::Layered || mode == CompressMode::AdaptiveFocus(None) {
+        let is_context_mode = matches!(mode, CompressMode::Layered | CompressMode::AdaptiveFocus(_) | CompressMode::TopicSegment);
+        if is_context_mode {
             let keywords = &self.compress_config.important_keywords;
             let important: Vec<ConversationMessage> = uncomprised.iter()
                 .filter(|m| keywords.iter().any(|k| m.content.contains(k)))
@@ -738,6 +740,86 @@ impl ConversationStore {
         }
     }
 
+    /// 话题分段压缩：检测话题边界，每段独立摘要
+    async fn apply_topic_compression(
+        &self,
+        history: Vec<ConversationMessage>,
+    ) -> Result<(Vec<ConversationMessage>, bool, Option<String>), ConversationError> {
+        let keep_recent = self.compress_config.keep_recent_messages;
+        let threshold = self.compress_config.compress_threshold;
+        if history.len() <= keep_recent || history.len() <= threshold {
+            return Ok((history, false, None));
+        }
+
+        // 分离最近消息
+        let recent: Vec<ConversationMessage> = history.iter()
+            .rev().take(keep_recent).rev().cloned().collect();
+        let to_segment: Vec<&ConversationMessage> = history.iter()
+            .take(history.len() - keep_recent).collect();
+
+        // LLM 检测话题边界
+        let boundaries = self.detect_topic_boundaries(&to_segment).await;
+
+        // 按边界切分，每段独立摘要
+        let mut segments: Vec<Vec<&ConversationMessage>> = Vec::new();
+        let mut start = 0;
+        for &end in &boundaries {
+            if end > start {
+                segments.push(to_segment[start..end].to_vec());
+                start = end;
+            }
+        }
+        if start < to_segment.len() {
+            segments.push(to_segment[start..].to_vec());
+        }
+
+        let mut result: Vec<ConversationMessage> = Vec::new();
+        let mut segment_count = 0;
+        for seg in &segments {
+            if seg.len() < 2 { continue; }
+            let text = seg.iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
+            let prompt = format!("这是对话中的一个话题。用一句话概括这个话题（30字内）：\n\n{}",
+                text.chars().take(500).collect::<String>());
+            if let Ok(r) = self.llm.invoke(vec![Message::human(&prompt)], None).await {
+                let summary = r.content.chars().take(80).collect::<String>();
+                result.push(ConversationMessage {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    session_id: "".to_string(),
+                    role: "summary".to_string(),
+                    content: format!("[话题] {}", summary),
+                    tokens: estimate_tokens(&summary) as i64 + 4,
+                    time_created: Utc::now().timestamp_millis(),
+                });
+                segment_count += 1;
+            }
+        }
+
+        result.extend(recent);
+        let info = format!("话题分段: {} 个话题摘要, {} 最近", segment_count, keep_recent);
+        Ok((result, true, Some(info)))
+    }
+
+    /// LLM 检测话题边界：返回每条消息后是否发生话题切换
+    async fn detect_topic_boundaries(&self, messages: &[&ConversationMessage]) -> Vec<usize> {
+        if messages.len() < 4 { return vec![messages.len()]; }
+        let text: String = messages.iter().enumerate()
+            .map(|(i, m)| format!("[{}] {}", i, m.content.chars().take(60).collect::<String>()))
+            .collect::<Vec<_>>().join("\n");
+        let prompt = format!(
+            "以下对话中，话题切换发生在哪条消息之后？\n\
+             输出切换点的序号（从0开始），逗号分隔。如果没有切换输出 -1。\n\n{}", text);
+        match self.llm.invoke(vec![Message::human(&prompt)], None).await {
+            Ok(r) => {
+                r.content.trim().split(',')
+                    .filter_map(|s| s.trim().parse::<usize>().ok())
+                    .filter(|&n| n > 0 && n < messages.len())
+                    .chain(std::iter::once(messages.len()))
+                    .collect()
+            }
+            Err(_) => vec![messages.len()],
+        }
+    }
+
     async fn generate_summary(
         &self,
         messages: &[ConversationMessage],
@@ -964,6 +1046,7 @@ impl ConversationStore {
             CompressModeInfo { name: "summary".to_string(), label: "摘要压缩".to_string(), description: "旧消息压缩为摘要".to_string() },
             CompressModeInfo { name: "layered".to_string(), label: "分层压缩".to_string(), description: "保护重要+摘要+最近".to_string() },
             CompressModeInfo { name: "afm".to_string(), label: "AFM自适应".to_string(), description: "LLM分类+F量完整保留+C精简+P占位".to_string() },
+            CompressModeInfo { name: "topic".to_string(), label: "话题分段".to_string(), description: "LLM检测话题边界，每段独立摘要".to_string() },
         ]
     }
     

@@ -6,6 +6,20 @@ pub struct LangGraphRequest {
     pub input: String,  // 用户输入
 }
 
+/// LangGraph 图结构请求
+#[derive(Deserialize)]
+pub struct LangGraphStructureRequest {
+    pub mode: String,  // "parallel" | "conditional" | "stream"
+}
+
+/// LangGraph 图结构响应（含 Mermaid 语法）
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LangGraphStructureResponse {
+    pub mode: String,
+    pub mermaid: String,
+    pub structure: serde_json::Value,
+}
+
 /// 并行执行结果
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ParallelDemoResult {
