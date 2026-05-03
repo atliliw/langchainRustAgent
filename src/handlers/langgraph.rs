@@ -65,14 +65,26 @@ pub async fn get_langgraph_structure(
     Ok(Json(result))
 }
 
-/// AI 任务拆解 + 执行
+/// AI 任务拆解（不含执行）
 /// POST /api/langgraph/decompose
 /// 请求: { task: "用户任务" }
-/// 返回: 图结构 + 子任务定义 + 执行结果
+/// 返回: 图结构 + 子任务定义（无执行结果）
 pub async fn decompose_task(
     State(state): State<Arc<AppState>>,
     Json(request): Json<TaskDecomposeRequest>,
 ) -> Result<Json<TaskDecomposeResult>, ApiErrorResponse> {
     let result = state.api.decompose_task(request.task).await?;
+    Ok(Json(result))
+}
+
+/// 执行子任务
+/// POST /api/langgraph/execute
+/// 请求: { task: "原始任务", sub_tasks: [...] }
+/// 返回: 每个子任务的执行结果 + token 统计
+pub async fn execute_sub_tasks(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<TaskExecuteRequest>,
+) -> Result<Json<TaskExecuteResult>, ApiErrorResponse> {
+    let result = state.api.execute_sub_tasks(request.task, request.sub_tasks).await?;
     Ok(Json(result))
 }

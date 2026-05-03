@@ -41,15 +41,29 @@ pub struct SubTaskExecResult {
     pub output: String,
     #[serde(default)]
     pub duration_ms: u64,
+    #[serde(default)]
+    pub tokens: usize,
 }
 
-/// 任务拆解 + 执行结果
+/// 任务拆解结果（不含执行）
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TaskDecomposeResult {
     pub original_task: String,
     pub sub_tasks: Vec<SubTaskDef>,
-    pub execution_results: Vec<SubTaskExecResult>,
     pub graph_structure: serde_json::Value,
+}
+
+/// 执行请求
+#[derive(Deserialize)]
+pub struct TaskExecuteRequest {
+    pub task: String,
+    pub sub_tasks: Vec<SubTaskDef>,
+}
+
+/// 执行结果
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TaskExecuteResult {
+    pub execution_results: Vec<SubTaskExecResult>,
 }
 
 /// 并行执行结果

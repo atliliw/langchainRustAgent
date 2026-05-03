@@ -408,99 +408,58 @@ impl LangGraphDemoService {
         })
     }
 
-    /// ──────────────────── AI 任务拆解 + 执行 ────────────────────
+    /// ──────────────────── AI 任务拆解 ────────────────────
     ///
-    /// 1. LLM 分析用户任务，拆成 N 个子任务
-    /// 2. 根据依赖关系构建图结构（只用于可视化）
-    /// 3. 按依赖顺序依次执行每个子任务（普通循环，不走 StateGraph）
-    /// 4. 返回图结构 + 每个节点的执行结果
-    pub async fn decompose_and_execute(
+    /// LLM 分析用户任务，拆成 N 个子任务，构建图结构
+    /// 不执行，返回给前端展示，用户确认后再执行
+    pub async fn decompose_task(
         config: &Config,
         task: String,
     ) -> Result<TaskDecomposeResult, GraphDemoError> {
-        let llm: Arc<OpenAIChat> = Arc::new(
-            OpenAIChat::new(
-                config.to_langchain_openai_config()
-                    .with_max_tokens(2048)
-            )
+        let llm = OpenAIChat::new(
+            config.to_langchain_openai_config().with_max_tokens(1024)
         );
 
-        // 1. 单次 LLM 调用：拆解 + 执行 + 汇总
         let prompt = format!(
-            r#"你是一个任务执行专家。请完成以下任务。
-
-要求：
-1. 将任务拆解为 2-6 个子任务
-2. 依次执行每个子任务
-3. 给出最终汇总答案（回答用户的原始问题）
+            r#"你是一个任务拆解专家。将以下任务拆解为 2-6 个子任务。
 
 返回 JSON，格式：
-{{
-  "sub_tasks": [
-    {{"name": "子任务名", "description": "描述", "depends_on": ["前置任务名"]}}
-  ],
-  "execution_results": [
-    {{"name": "子任务名", "output": "执行结果"}}
-  ],
-  "final_answer": "最终的完整答案"
-}}
+[
+  {{"name": "子任务名（英文）", "description": "子任务描述（中文）", "depends_on": ["前置任务名"]}}
+]
 
 用户任务：{task}
 
-请只返回 JSON，不要多余内容。"#,
+只返回 JSON。"#,
             task = task
         );
 
-        let resp = llm
-            .invoke(vec![Message::human(&prompt)], None)
-            .await
-            .map_err(|e| GraphDemoError::ExecutionError(format!("LLM 调用失败: {}", e)))?;
+        let resp = llm.invoke(vec![Message::human(&prompt)], None)
+            .await.map_err(|e| GraphDemoError::ExecutionError(format!("LLM 失败: {}", e)))?;
 
         let cleaned = resp.content
             .trim_start_matches("```json").trim_start_matches("```")
             .trim_end_matches("```").trim();
 
-        #[derive(serde::Deserialize)]
-        struct DecomposeResponse {
-            sub_tasks: Vec<SubTaskDef>,
-            execution_results: Vec<SubTaskExecResult>,
-            #[serde(default)]
-            final_answer: String,
-        }
-
-        let parsed: DecomposeResponse = serde_json::from_str(cleaned)
+        let sub_tasks: Vec<SubTaskDef> = serde_json::from_str(cleaned)
             .map_err(|e| GraphDemoError::BuildError(format!(
                 "LLM 返回格式错误: {} — 原始内容: {}",
                 e, &cleaned.chars().take(300).collect::<String>()
             )))?;
 
-        let sub_tasks = parsed.sub_tasks;
-        let mut execution_results = parsed.execution_results;
-
-        // 把 final_answer 作为最后一个执行结果，确保显示在表格底部
-        if !parsed.final_answer.is_empty() {
-            execution_results.push(SubTaskExecResult {
-                name: "📌 最终答案".to_string(),
-                output: parsed.final_answer,
-                duration_ms: 0,
-            });
-        }
-
         if sub_tasks.is_empty() {
             return Err(GraphDemoError::BuildError("LLM 未返回子任务".to_string()));
         }
 
-        // 2. 构建可视化图结构（纯展示用）
+        // 构建图结构
         let mut graph: StateGraph<AgentState> = StateGraph::new();
         let name_set: std::collections::HashSet<&str> =
             sub_tasks.iter().map(|s| s.name.as_str()).collect();
 
         for sub in &sub_tasks {
-            let n = sub.name.clone();
-            graph.add_node_fn(n, |state| Ok(StateUpdate::full(state.clone())));
+            graph.add_node_fn(sub.name.clone(), |state| Ok(StateUpdate::full(state.clone())));
         }
 
-        // 所有节点链式连接（保证可达）+ 依赖边额外展示
         let mut seen: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
 
@@ -511,10 +470,8 @@ impl LangGraphDemoService {
             seen.insert(k);
             graph.add_edge(&sub_tasks[i-1].name, &sub_tasks[i].name);
         }
-        seen.insert((sub_tasks.last().unwrap().name.clone(), END.to_string()));
         graph.add_edge(&sub_tasks.last().unwrap().name, END);
 
-        // 依赖边（额外展示）
         for sub in &sub_tasks {
             for dep in &sub.depends_on {
                 if name_set.contains(dep.as_str()) {
@@ -525,8 +482,6 @@ impl LangGraphDemoService {
                 }
             }
         }
-
-        // 全部 → END
         for sub in &sub_tasks {
             let k = (sub.name.clone(), END.to_string());
             if seen.insert(k) {
@@ -534,20 +489,88 @@ impl LangGraphDemoService {
             }
         }
 
-        let compiled = graph
-            .compile()
+        let compiled = graph.compile()
             .map_err(|e| GraphDemoError::BuildError(e.to_string()))?;
-
-        let graph_structure = compiled.visualize_json();
-
-        // 3. 执行结果已由 LLM 在步骤 1 中返回
 
         Ok(TaskDecomposeResult {
             original_task: task,
             sub_tasks,
-            execution_results,
-            graph_structure,
+            graph_structure: compiled.visualize_json(),
         })
+    }
+
+    /// ──────────────────── 执行子任务 ────────────────────
+    ///
+    /// 按依赖顺序依次执行每个子任务，返回结果 + token 统计
+    pub async fn execute_sub_tasks(
+        config: &Config,
+        task: String,
+        sub_tasks: Vec<SubTaskDef>,
+    ) -> Result<Vec<SubTaskExecResult>, GraphDemoError> {
+        let llm = Arc::new(
+            OpenAIChat::new(
+                config.to_langchain_openai_config().with_max_tokens(1024)
+            )
+        );
+
+        let name_set: std::collections::HashSet<&str> =
+            sub_tasks.iter().map(|s| s.name.as_str()).collect();
+        let mut results: Vec<SubTaskExecResult> = Vec::new();
+        let mut completed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let max_rounds = sub_tasks.len() * 2;
+
+        for _round in 0..max_rounds {
+            if results.len() >= sub_tasks.len() { break; }
+
+            let ready: Vec<&SubTaskDef> = sub_tasks.iter().filter(|sub| {
+                if completed.contains(&sub.name) { return false; }
+                sub.depends_on.iter()
+                    .filter(|d| name_set.contains(d.as_str()))
+                    .all(|d| completed.contains(d))
+            }).collect();
+
+            if ready.is_empty() { break; }
+
+            let mut handles = Vec::new();
+            for sub in ready {
+                let desc = sub.description.clone();
+                let n = sub.name.clone();
+                let l = llm.clone();
+                let t = task.clone();
+                handles.push(tokio::spawn(async move {
+                    let start = Instant::now();
+                    let prompt = format!(
+                        "任务：{t}\n子任务：{desc}\n\n请执行这个子任务。",
+                        t = t, desc = desc,
+                    );
+                    match l.invoke(vec![Message::human(&prompt)], None).await {
+                        Ok(r) => {
+                            let tokens = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
+                            SubTaskExecResult {
+                                name: n,
+                                output: r.content.chars().take(200).collect(),
+                                duration_ms: start.elapsed().as_millis() as u64,
+                                tokens,
+                            }
+                        }
+                        Err(e) => SubTaskExecResult {
+                            name: n, output: format!("执行失败: {}", e),
+                            duration_ms: 0, tokens: 0,
+                        },
+                    }
+                }));
+            }
+
+            for h in handles {
+                if let Ok(r) = h.await {
+                    let name = r.name.clone();
+                    completed.insert(name);
+                    results.push(r);
+                }
+            }
+        }
+
+        Ok(results)
     }
 }
 

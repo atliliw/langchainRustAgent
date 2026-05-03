@@ -410,8 +410,14 @@ impl ApiService {
     }
     
     pub async fn decompose_task(&self, task: String) -> Result<TaskDecomposeResult, ApiError> {
-        LangGraphDemoService::decompose_and_execute(&self.config, task).await
+        LangGraphDemoService::decompose_task(&self.config, task).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
+    }
+    
+    pub async fn execute_sub_tasks(&self, task: String, sub_tasks: Vec<SubTaskDef>) -> Result<TaskExecuteResult, ApiError> {
+        let results = LangGraphDemoService::execute_sub_tasks(&self.config, task, sub_tasks).await
+            .map_err(|e| ApiError::SearchError(e.to_string()))?;
+        Ok(TaskExecuteResult { execution_results: results })
     }
     
     /// ──────────────────── API统计 ────────────────────

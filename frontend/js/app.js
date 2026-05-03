@@ -940,6 +940,8 @@ async function loadLangGraphInfo() {
     } catch (e) { /* ignore */ }
 }
 
+let _decomposedData = null;
+
 async function runDecompose() {
     const task = document.getElementById('decompose-input').value.trim();
     if (!task) { showToast('请输入任务'); return; }
@@ -970,56 +972,95 @@ async function runDecompose() {
             throw new Error('LLM 返回格式异常，请重试');
         }
 
+        _decomposedData = data;
         document.getElementById('graph-title').textContent = `🤖 任务拆解: ${escapeHtml(data.original_task)}`;
         document.getElementById('graph-desc').textContent = `${data.sub_tasks.length} 个子任务`;
+        container.innerHTML = renderGraphHtml(data.graph_structure, {});
 
-        const annotations = {};
-        (data.execution_results || []).forEach(r => {
-            annotations[r.name] = { label: r.output, ms: r.duration_ms };
-        });
-        container.innerHTML = renderGraphHtml(data.graph_structure, annotations);
-
-        let detailHtml = `<h3 style="color:#10b981;margin-top:20px;">执行结果</h3>`;
-        detailHtml += `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;">`;
-        detailHtml += `<p><strong>原始任务：</strong>${escapeHtml(data.original_task)}</p>`;
-        detailHtml += `<p><strong>子任务数：</strong>${data.sub_tasks.length}</p>`;
-        detailHtml += `<table style="width:100%;margin-top:10px;border-collapse:collapse;">
+        let detailHtml = `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:20px;">`;
+        detailHtml += `<h3 style="color:#10b981;margin:0;">📋 子任务列表</h3>`;
+        detailHtml += `<button class="btn" onclick="executeDecomposed()" style="background:#10b981;color:white;">▶ 执行所有子任务</button>`;
+        detailHtml += `</div>`;
+        detailHtml += `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;margin-top:10px;">
+            <table style="width:100%;border-collapse:collapse;">
             <thead><tr style="background:#f1f5f9;">
                 <th style="padding:8px;border:1px solid #e2e8f0;">子任务</th>
                 <th style="padding:8px;border:1px solid #e2e8f0;">描述</th>
-                <th style="padding:8px;border:1px solid #e2e8f0;">输出</th>
-                <th style="padding:8px;border:1px solid #e2e8f0;">耗时</th>
+                <th style="padding:8px;border:1px solid #e2e8f0;">依赖</th>
             </tr></thead>
             <tbody>`;
-        data.sub_tasks.forEach((st, i) => {
-            const execResult = (data.execution_results || [])[i];
-            const isFinal = st.name && st.name.includes('最终答案');
-            const bgStyle = isFinal ? 'background:#f0fdf4;' : '';
-            detailHtml += `<tr style="${bgStyle}">
-                <td style="padding:8px;border:1px solid #e2e8f0;">${escapeHtml(st.name)}${isFinal ? ' 🎯' : ''}</td>
-                <td style="padding:8px;border:1px solid #e2e8f0;">${isFinal ? '汇总回答' : escapeHtml(st.description || '')}</td>
-                <td style="padding:8px;border:1px solid #e2e8f0;">${execResult ? escapeHtml(execResult.output) : '-'}</td>
-                <td style="padding:8px;border:1px solid #e2e8f0;">${execResult ? execResult.duration_ms + 'ms' : '-'}</td>
+        data.sub_tasks.forEach(st => {
+            const deps = (st.depends_on && st.depends_on.length) ? st.depends_on.join(', ') : '无';
+            detailHtml += `<tr>
+                <td style="padding:8px;border:1px solid #e2e8f0;">${escapeHtml(st.name)}</td>
+                <td style="padding:8px;border:1px solid #e2e8f0;">${escapeHtml(st.description)}</td>
+                <td style="padding:8px;border:1px solid #e2e8f0;">${deps}</td>
             </tr>`;
         });
-        // 如果 execution_results 有多余的条目（如 final_answer），追加显示
-        if (data.execution_results && data.execution_results.length > data.sub_tasks.length) {
-            for (let i = data.sub_tasks.length; i < data.execution_results.length; i++) {
-                const r = data.execution_results[i];
-                if (r.name && r.name.includes('最终答案')) {
-                    detailHtml += `<tr style="background:#f0fdf4;">
-                        <td style="padding:8px;border:1px solid #e2e8f0;">📌 最终答案 🎯</td>
-                        <td style="padding:8px;border:1px solid #e2e8f0;">汇总回答</td>
-                        <td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;">${escapeHtml(r.output)}</td>
-                        <td style="padding:8px;border:1px solid #e2e8f0;">-</td>
-                    </tr>`;
-                }
-            }
-        }
         detailHtml += `</tbody></table></div>`;
         results.innerHTML = detailHtml;
     } catch (e) {
         container.innerHTML = `<div style="color:#e94560;text-align:center;padding:20px;">失败: ${e.message}</div>`;
+    }
+}
+
+async function executeDecomposed() {
+    if (!_decomposedData) return;
+    const results = document.getElementById('langgraph-results');
+    results.innerHTML = '<div style="text-align:center;color:#94a3b8;padding:20px;">⏳ 执行中...</div>';
+
+    try {
+        const res = await fetch(`${API_BASE}/langgraph/execute`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                task: _decomposedData.original_task,
+                sub_tasks: _decomposedData.sub_tasks
+            })
+        });
+        if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            throw new Error(errData.error || `服务器返回 ${res.status}`);
+        }
+        const data = await res.json();
+
+        // 更新图上的注解
+        const annotations = {};
+        (data.execution_results || []).forEach(r => {
+            annotations[r.name] = { label: r.output, ms: r.duration_ms };
+        });
+        const container = document.getElementById('mermaid-container');
+        container.innerHTML = renderGraphHtml(_decomposedData.graph_structure, annotations);
+
+        // 显示结果表格（含 token）
+        let html = `<h3 style="color:#10b981;margin-top:20px;">✅ 执行完成</h3>`;
+        html += `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;">
+            <table style="width:100%;border-collapse:collapse;">
+            <thead><tr style="background:#f1f5f9;">
+                <th style="padding:8px;border:1px solid #e2e8f0;">子任务</th>
+                <th style="padding:8px;border:1px solid #e2e8f0;">输出</th>
+                <th style="padding:8px;border:1px solid #e2e8f0;">耗时</th>
+                <th style="padding:8px;border:1px solid #e2e8f0;">Token</th>
+            </tr></thead>
+            <tbody>`;
+        (data.execution_results || []).forEach(r => {
+            html += `<tr>
+                <td style="padding:8px;border:1px solid #e2e8f0;">${escapeHtml(r.name)}</td>
+                <td style="padding:8px;border:1px solid #e2e8f0;">${escapeHtml(r.output)}</td>
+                <td style="padding:8px;border:1px solid #e2e8f0;">${r.duration_ms}ms</td>
+                <td style="padding:8px;border:1px solid #e2e8f0;">${r.tokens || '-'}</td>
+            </tr>`;
+        });
+        html += `</tbody></table></div>`;
+
+        // 汇总
+        const totalTokens = (data.execution_results || []).reduce((s, r) => s + (r.tokens || 0), 0);
+        const totalMs = (data.execution_results || []).reduce((s, r) => s + r.duration_ms, 0);
+        html += `<p style="margin-top:10px;color:#64748b;font-size:13px;">总计: ${totalMs}ms | ${totalTokens} tokens</p>`;
+
+        results.innerHTML = html;
+    } catch (e) {
+        results.innerHTML = `<div style="color:#e94560;text-align:center;padding:20px;">执行失败: ${e.message}</div>`;
     }
 }
 
