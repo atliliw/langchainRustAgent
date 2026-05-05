@@ -166,3 +166,18 @@ pub struct AgentExecResponse {
     pub total_duration_ms: u64,
     pub total_tokens: usize,
 }
+
+/// 逐步执行：单步结果
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AgentStepResult {
+    pub session_id: String,
+    pub result: AgentExecResult,
+    pub has_next: bool,
+    pub is_final: bool,
+}
+
+/// 逐步执行：继续请求
+#[derive(Deserialize)]
+pub struct AgentStepRequest {
+    pub session_id: String,
+}

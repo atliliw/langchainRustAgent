@@ -427,8 +427,18 @@ impl ApiService {
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
     
-    pub async fn agent_execute(&self, task: String, agent_tasks: Vec<AgentTask>) -> Result<AgentExecResponse, ApiError> {
-        crate::services::agent_executor::AgentEngine::execute(&self.config, task, agent_tasks).await
+    pub async fn agent_execute_start(&self, task: String, agent_tasks: Vec<AgentTask>) -> Result<(String, AgentExecResult, bool), ApiError> {
+        crate::services::agent_executor::AgentEngine::execute_start(&self.config, task, agent_tasks).await
+            .map_err(|e| ApiError::SearchError(e.to_string()))
+    }
+
+    pub async fn agent_execute_next(&self, session_id: &str) -> Result<(AgentExecResult, bool), ApiError> {
+        crate::services::agent_executor::AgentEngine::execute_next(&self.config, session_id).await
+            .map_err(|e| ApiError::SearchError(e.to_string()))
+    }
+
+    pub async fn agent_finalize(&self, session_id: &str) -> Result<AgentExecResponse, ApiError> {
+        crate::services::agent_executor::AgentEngine::finalize(&self.config, session_id).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
     

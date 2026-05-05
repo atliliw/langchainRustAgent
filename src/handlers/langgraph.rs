@@ -101,18 +101,35 @@ pub async fn agent_plan(
     Ok(Json(result))
 }
 
-/// Agent 执行
+/// Agent 开始执行
 /// POST /api/agent/execute
 pub async fn agent_execute(
     State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
-) -> Result<Json<AgentExecResponse>, ApiErrorResponse> {
+) -> Result<Json<AgentStepResult>, ApiErrorResponse> {
     let task = request["task"].as_str().unwrap_or("").to_string();
     let tasks: Vec<AgentTask> = serde_json::from_value(request["agent_tasks"].clone())
-        .map_err(|_| ApiErrorResponse(
-            axum::http::StatusCode::BAD_REQUEST,
-            "agent_tasks 格式错误".to_string(),
-        ))?;
-    let result = state.api.agent_execute(task, tasks).await?;
+        .map_err(|_| ApiErrorResponse(axum::http::StatusCode::BAD_REQUEST, "agent_tasks 格式错误".to_string()))?;
+    let (session_id, result, has_next) = state.api.agent_execute_start(task, tasks).await?;
+    Ok(Json(AgentStepResult { session_id, result, has_next, is_final: !has_next }))
+}
+
+/// Agent 继续执行下一步
+/// POST /api/agent/next
+pub async fn agent_next(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<AgentStepRequest>,
+) -> Result<Json<AgentStepResult>, ApiErrorResponse> {
+    let (result, has_next) = state.api.agent_execute_next(&request.session_id).await?;
+    Ok(Json(AgentStepResult { session_id: request.session_id, result, has_next, is_final: !has_next }))
+}
+
+/// Agent 完成验证
+/// POST /api/agent/finalize
+pub async fn agent_finalize(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<AgentStepRequest>,
+) -> Result<Json<AgentExecResponse>, ApiErrorResponse> {
+    let result = state.api.agent_finalize(&request.session_id).await?;
     Ok(Json(result))
 }

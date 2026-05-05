@@ -1441,10 +1441,13 @@ async function loadDocumentsByTag(tag) {
 }
 
 let _agentPlanData = null;
+let _agentSessionId = null;
+let _agentResults = [];
 
 async function runAgentPlan() {
     const task = document.getElementById('agent-input').value.trim();
     if (!task) { showToast('请输入任务'); return; }
+    _agentSessionId = null; _agentResults = [];
     const viz = document.getElementById('agent-viz');
     const container = document.getElementById('agent-container');
     const detail = document.getElementById('agent-plan-detail');
@@ -1477,14 +1480,13 @@ async function runAgentPlan() {
             </tr></thead>
             <tbody>`;
         data.tasks.forEach(t => {
-            html += `<tr>
-                <td style="padding:8px;border:1px solid #e2e8f0;"><strong>${escapeHtml(t.name)}</strong><br><span style="font-size:12px;color:#64748b;">${escapeHtml(t.description)}</span></td>
+            html += `<tr><td style="padding:8px;border:1px solid #e2e8f0;"><strong>${escapeHtml(t.name)}</strong><br><span style="font-size:12px;color:#64748b;">${escapeHtml(t.description)}</span></td>
                 <td style="padding:8px;border:1px solid #e2e8f0;"><span style="background:#ede9fe;padding:2px 8px;border-radius:4px;font-size:12px;">${escapeHtml(t.tool)}</span></td>
                 <td style="padding:8px;border:1px solid #e2e8f0;font-size:12px;">${(t.depends_on||[]).join(', ') || '无'}</td>
-                <td style="padding:8px;border:1px solid #e2e8f0;font-size:12px;color:#475569;">${escapeHtml(t.input_template)}</td>
-            </tr>`;
+                <td style="padding:8px;border:1px solid #e2e8f0;font-size:12px;color:#475569;">${escapeHtml(t.input_template)}</td></tr>`;
         });
         html += `</tbody></table></div>`;
+        html += `<button class="btn" onclick="agentStepExecute()" style="background:#8b5cf6;color:white;margin-top:10px;">▶ 开始执行</button>`;
         results.innerHTML = html;
         detail.style.display = 'block';
     } catch (e) {
@@ -1492,60 +1494,95 @@ async function runAgentPlan() {
     }
 }
 
-async function runAgentExecute() {
+async function agentStepExecute() {
     if (!_agentPlanData) return;
-    const results = document.getElementById('agent-results');
-    results.innerHTML = '<div style="text-align:center;color:#94a3b8;padding:20px;">⏳ 执行中...</div>';
+    const btn = document.querySelector('#agent-plan-detail .btn, #agent-results .btn');
+    if (btn) btn.disabled = true;
 
     try {
-        const res = await fetch(`${API_BASE}/agent/execute`, {
-            method: 'POST', headers: {'Content-Type':'application/json'},
-            body: JSON.stringify({
-                task: _agentPlanData.original_task,
-                agent_tasks: _agentPlanData.tasks
-            })
-        });
+        const url = _agentSessionId ? `${API_BASE}/agent/next` : `${API_BASE}/agent/execute`;
+        const body = _agentSessionId
+            ? JSON.stringify({session_id: _agentSessionId})
+            : JSON.stringify({task: _agentPlanData.original_task, agent_tasks: _agentPlanData.tasks});
+
+        const res = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body});
         if (!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.error||`${res.status}`); }
-        const data = await res.json();
+        const step = await res.json();
+
+        _agentSessionId = step.session_id;
+        _agentResults.push(step.result);
 
         // 更新图注解
         const annotations = {};
-        (data.results || []).forEach(r => { annotations[r.task_name] = {label: r.output.substring(0,50), ms: r.duration_ms}; });
+        _agentResults.forEach(r => { annotations[r.task_name] = {label: r.output.substring(0,50), ms: r.duration_ms}; });
         document.getElementById('agent-container').innerHTML = renderGraphHtml(_agentPlanData.graph_structure, annotations);
 
-        let html = `<h3 style="color:#7c3aed;margin-top:20px;">✅ 执行完成</h3>`;
-        html += `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;">
-            <table style="width:100%;border-collapse:collapse;">
+        // 显示结果
+        let html = `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;margin-top:10px;">`;
+        html += `<table style="width:100%;border-collapse:collapse;">
             <thead><tr style="background:#f5f3ff;">
                 <th style="padding:8px;border:1px solid #e2e8f0;">任务</th>
                 <th style="padding:8px;border:1px solid #e2e8f0;">工具</th>
                 <th style="padding:8px;border:1px solid #e2e8f0;">输出</th>
                 <th style="padding:8px;border:1px solid #e2e8f0;">耗时</th>
                 <th style="padding:8px;border:1px solid #e2e8f0;">Token</th>
-            </tr></thead>
-            <tbody>`;
-        (data.results || []).forEach(r => {
-            html += `<tr>
-                <td style="padding:8px;border:1px solid #e2e8f0;">${escapeHtml(r.task_name)}</td>
+            </tr></thead><tbody>`;
+        _agentResults.forEach(r => {
+            html += `<tr><td style="padding:8px;border:1px solid #e2e8f0;">${escapeHtml(r.task_name)}</td>
                 <td style="padding:8px;border:1px solid #e2e8f0;"><span style="background:#ede9fe;padding:2px 8px;border-radius:4px;font-size:12px;">${escapeHtml(r.tool)}</span></td>
                 <td style="padding:8px;border:1px solid #e2e8f0;font-size:12px;">${escapeHtml(r.output)}</td>
                 <td style="padding:8px;border:1px solid #e2e8f0;">${r.duration_ms}ms</td>
-                <td style="padding:8px;border:1px solid #e2e8f0;">${r.tokens}</td>
-            </tr>`;
+                <td style="padding:8px;border:1px solid #e2e8f0;">${r.tokens}</td></tr>`;
         });
-        html += `</tbody></table></div>`;
+        html += `</tbody></table>`;
 
-        if (data.final_answer) {
-            html += `<div style="background:#f5f3ff;border:1px solid #c4b5fd;border-radius:8px;padding:15px;margin-top:15px;">
-                <h4 style="color:#7c3aed;margin:0 0 10px 0;">🎯 最终答案</h4>
-                <div style="color:#1e293b;font-size:14px;line-height:1.6;">${escapeHtml(data.final_answer)}</div>
-            </div>`;
+        if (step.has_next) {
+            html += `<button class="btn" onclick="agentStepExecute()" style="background:#8b5cf6;color:white;margin-top:10px;">▶ 执行下一步</button>`;
+            html += `<button class="btn" onclick="agentRunAll()" style="background:#6d28d9;color:white;margin-top:10px;margin-left:8px;">▶▶ 执行全部</button>`;
+        } else {
+            html += `<button class="btn" onclick="agentFinalize()" style="background:#10b981;color:white;margin-top:10px;">✅ 完成验证</button>`;
         }
-
-        html += `<p style="margin-top:10px;color:#64748b;font-size:13px;">总计: ${data.total_duration_ms}ms | ${data.total_tokens} tokens</p>`;
-        results.innerHTML = html;
+        html += `</div>`;
+        document.getElementById('agent-results').innerHTML = html;
     } catch (e) {
-        results.innerHTML = `<div style="color:#e94560;text-align:center;padding:20px;">${e.message}</div>`;
+        document.getElementById('agent-results').innerHTML = `<div style="color:#e94560;padding:20px;">${e.message}</div>`;
+    }
+}
+
+async function agentRunAll() {
+    // 连续执行直到完成
+    while (true) {
+        const res = await fetch(`${API_BASE}/agent/next`, {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({session_id: _agentSessionId})
+        });
+        const step = await res.json();
+        _agentResults.push(step.result);
+        if (!step.has_next) break;
+    }
+    const annotations = {};
+    _agentResults.forEach(r => { annotations[r.task_name] = {label: r.output.substring(0,50), ms: r.duration_ms}; });
+    document.getElementById('agent-container').innerHTML = renderGraphHtml(_agentPlanData.graph_structure, annotations);
+    // 自动验证
+    agentFinalize();
+}
+
+async function agentFinalize() {
+    try {
+        const res = await fetch(`${API_BASE}/agent/finalize`, {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({session_id: _agentSessionId})
+        });
+        const data = await res.json();
+        let html = document.getElementById('agent-results').innerHTML;
+        html += `<div style="background:#f5f3ff;border:1px solid #c4b5fd;border-radius:8px;padding:15px;margin-top:15px;">
+            <h4 style="color:#7c3aed;margin:0 0 10px 0;">🎯 最终答案</h4>
+            <div style="color:#1e293b;font-size:14px;line-height:1.6;">${escapeHtml(data.final_answer)}</div>
+            <p style="margin-top:10px;color:#64748b;font-size:13px;">总计: ${data.total_duration_ms}ms | ${data.total_tokens} tokens</p>
+        </div>`;
+        document.getElementById('agent-results').innerHTML = html;
+    } catch (e) {
+        showToast('验证失败: ' + e.message);
     }
 }
 
