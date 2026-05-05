@@ -1496,8 +1496,13 @@ async function runAgentPlan() {
 
 async function agentStepExecute() {
     if (!_agentPlanData) return;
-    const btn = document.querySelector('#agent-plan-detail .btn, #agent-results .btn');
-    if (btn) btn.disabled = true;
+    const resDiv = document.getElementById('agent-results');
+
+    // 显示加载状态
+    resDiv.innerHTML = `<div style="text-align:center;padding:20px;color:#8b5cf6;">
+        <div style="font-size:24px;margin-bottom:8px;">⏳</div>
+        <div>执行中，请稍候...</div>
+    </div>`;
 
     try {
         const url = _agentSessionId ? `${API_BASE}/agent/next` : `${API_BASE}/agent/execute`;
@@ -1522,30 +1527,30 @@ async function agentStepExecute() {
         html += `<table style="width:100%;border-collapse:collapse;">
             <thead><tr style="background:#f5f3ff;">
                 <th style="padding:8px;border:1px solid #e2e8f0;">任务</th>
-                <th style="padding:8px;border:1px solid #e2e8f0;">工具</th>
                 <th style="padding:8px;border:1px solid #e2e8f0;">输出</th>
                 <th style="padding:8px;border:1px solid #e2e8f0;">耗时</th>
-                <th style="padding:8px;border:1px solid #e2e8f0;">Token</th>
             </tr></thead><tbody>`;
         _agentResults.forEach(r => {
-            html += `<tr><td style="padding:8px;border:1px solid #e2e8f0;">${escapeHtml(r.task_name)}</td>
-                <td style="padding:8px;border:1px solid #e2e8f0;"><span style="background:#ede9fe;padding:2px 8px;border-radius:4px;font-size:12px;">${escapeHtml(r.tool)}</span></td>
-                <td style="padding:8px;border:1px solid #e2e8f0;font-size:12px;">${escapeHtml(r.output)}</td>
+            html += `<tr>
+                <td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;">${escapeHtml(r.task_name)}</td>
+                <td style="padding:8px;border:1px solid #e2e8f0;font-size:13px;">${escapeHtml(r.output)}</td>
                 <td style="padding:8px;border:1px solid #e2e8f0;">${r.duration_ms}ms</td>
-                <td style="padding:8px;border:1px solid #e2e8f0;">${r.tokens}</td></tr>`;
+            </tr>`;
         });
         html += `</tbody></table>`;
 
         if (step.has_next) {
-            html += `<button class="btn" onclick="agentStepExecute()" style="background:#8b5cf6;color:white;margin-top:10px;">▶ 执行下一步</button>`;
-            html += `<button class="btn" onclick="agentRunAll()" style="background:#6d28d9;color:white;margin-top:10px;margin-left:8px;">▶▶ 执行全部</button>`;
+            html += `<div style="display:flex;gap:10px;margin-top:15px;">
+                <button class="btn" onclick="agentStepExecute()" style="background:#8b5cf6;color:white;flex:1;padding:12px;">▶ 执行下一步</button>
+                <button class="btn" onclick="agentRunAll()" style="background:#6d28d9;color:white;flex:1;padding:12px;">▶▶ 全部执行</button>
+            </div>`;
         } else {
-            html += `<button class="btn" onclick="agentFinalize()" style="background:#10b981;color:white;margin-top:10px;">✅ 完成验证</button>`;
+            html += `<button class="btn" onclick="agentFinalize()" style="background:#10b981;color:white;margin-top:15px;padding:12px;width:100%;">✅ 完成验证</button>`;
         }
         html += `</div>`;
-        document.getElementById('agent-results').innerHTML = html;
+        resDiv.innerHTML = html;
     } catch (e) {
-        document.getElementById('agent-results').innerHTML = `<div style="color:#e94560;padding:20px;">${e.message}</div>`;
+        resDiv.innerHTML = `<div style="color:#e94560;text-align:center;padding:20px;">❌ ${escapeHtml(e.message)}</div>`;
     }
 }
 

@@ -32,7 +32,7 @@ impl AgentEngine {
     pub async fn plan(config: &Config, task: String) -> Result<AgentPlan, GraphDemoError> {
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(2048));
         let tj = AVAILABLE_TOOLS.iter().map(|(n,d)| format!("{{\"name\":\"{}\",\"description\":\"{}\"}}",n,d)).collect::<Vec<_>>().join(",");
-        let p = format!("将任务拆解为2-5个子任务并分配工具。可用工具：[{}] 返回JSON：[{{\"name\":\"子任务名\",\"description\":\"做什么\",\"tool\":\"工具名\",\"depends_on\":[\"前置\"],\"input_template\":\"需要什么\"}}] 任务：{} 只返回JSON。", tj, task);
+        let p = format!("将任务拆解为2-5个子任务并分配工具。可用工具：[{}] 返回JSON：[{{\"name\":\"中文子任务名（不要英文）\",\"description\":\"做什么\",\"tool\":\"工具名\",\"depends_on\":[\"前置\"],\"input_template\":\"需要什么\"}}] 任务：{} 只返回JSON。", tj, task);
         let r = llm.invoke(vec![Message::human(&p)], None).await.map_err(|e| GraphDemoError::ExecutionError(e.to_string()))?;
         let c = r.content.trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
         let tasks: Vec<AgentTask> = serde_json::from_str(c).map_err(|e| GraphDemoError::BuildError(format!("格式错误: {} — {}", e, &c.chars().take(200).collect::<String>())))?;
@@ -100,7 +100,7 @@ impl AgentEngine {
 
         let names: Vec<String> = agent_tasks.iter().map(|t| t.name.clone()).collect();
         let c = graph.compile().map_err(|e| GraphDemoError::BuildError(e.to_string()))?;
-        Ok(c.with_checkpointer(MemoryCheckpointer::new()).with_interrupt_before(names))
+        Ok(c.with_checkpointer(MemoryCheckpointer::new()).with_interrupt_after(names))
     }
 
     pub async fn execute_start(config: &Config, task: String, agent_tasks: Vec<AgentTask>) -> Result<(String, AgentExecResult, bool), GraphDemoError> {
@@ -136,19 +136,27 @@ impl AgentEngine {
                 let last = results.into_iter().last().unwrap();
                 Ok((sid.to_string(), last, false))
             }
-            Err(GraphError::ExecutionInterrupted(node)) => {
-                let cp = compiled.create_resume_execution(&node).await;
-                let remaining: Vec<AgentTask> = agent_tasks.iter().filter(|t| t.name != *node).cloned().collect();
+            Err(GraphError::ExecutionInterrupted(after)) => {
+                // after 格式: "after_taskname"，提取 taskname
+                let node = after.strip_prefix("after_").unwrap_or(&after).to_string();
+                // 从 checkpoint 获取刚完成的节点的执行结果
+                let last_output = compiled.last_checkpoint_state().await
+                    .and_then(|s| s.steps.last().cloned())
+                    .map(|step| step.observation)
+                    .unwrap_or_default();
+
+                let cp = compiled.create_resume_execution(&after).await;
                 with_store(|m| { m.insert(sid.to_string(), StoredExec{
-                    original_task: task.to_string(), agent_tasks: remaining.clone(),
+                    original_task: task.to_string(), agent_tasks: agent_tasks.to_vec(),
                     checkpoint: cp,
                 }); });
+                let has_more = agent_tasks.iter().any(|t| t.name != node);
                 let result = AgentExecResult{
-                    task_name: node.clone(), tool: String::new(), input_summary: String::new(),
-                    output: format!("完成 ({}ms)", start.elapsed().as_millis()),
+                    task_name: node, tool: String::new(), input_summary: String::new(),
+                    output: last_output,
                     duration_ms: start.elapsed().as_millis() as u64, tokens: 0,
                 };
-                Ok((sid.to_string(), result, !remaining.is_empty()))
+                Ok((sid.to_string(), result, has_more))
             }
             Err(e) => Err(GraphDemoError::ExecutionError(e.to_string())),
         }
