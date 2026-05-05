@@ -1496,13 +1496,14 @@ async function runAgentPlan() {
 
 async function agentStepExecute() {
     if (!_agentPlanData) return;
-    const resDiv = document.getElementById('agent-results');
 
-    // 显示加载状态
-    resDiv.innerHTML = `<div style="text-align:center;padding:20px;color:#8b5cf6;">
-        <div style="font-size:24px;margin-bottom:8px;">⏳</div>
-        <div>执行中，请稍候...</div>
-    </div>`;
+    // 禁用所有按钮 + 显示执行中
+    document.querySelectorAll('#agent-results button').forEach(b => {
+        b.disabled = true;
+        b.textContent = '⏳ 执行中...';
+        b.style.opacity = '0.6';
+    });
+    showToast('正在执行...');
 
     try {
         const url = _agentSessionId ? `${API_BASE}/agent/next` : `${API_BASE}/agent/execute`;

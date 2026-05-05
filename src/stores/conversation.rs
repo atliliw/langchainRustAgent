@@ -290,8 +290,14 @@ impl ConversationStore {
             CompressMode::TokenLimit(n) => self.apply_token_limit(history, n),
             CompressMode::Summary(n) => self.apply_summary_compression(history, n).await,
             CompressMode::Layered => self.apply_layered_compression(history).await,
-            CompressMode::AdaptiveFocus(n) => self.apply_afm_compression(history, n).await,
-            CompressMode::TopicSegment => self.apply_topic_compression(history).await,
+            CompressMode::AdaptiveFocus(n) => {
+                let keep = n.unwrap_or(self.compress_config.keep_recent_messages);
+                self.apply_sliding_window(history, Some(keep))
+            }
+            CompressMode::TopicSegment => {
+                let keep = self.compress_config.keep_recent_messages;
+                self.apply_sliding_window(history, Some(keep))
+            }
             CompressMode::None => Ok((history, false, None)),
         }
     }
@@ -454,7 +460,12 @@ impl ConversationStore {
         }
 
         let new_until = uncomprised.iter().map(|m| m.time_created).max().unwrap_or(0);
-        let (compressed, was_compressed, info) = self.apply_compression(uncomprised, mode).await?;
+        // AFM 和 TopicSegment 在后台走完整压缩（含 LLM），不走快速截断
+        let (compressed, was_compressed, info) = match mode {
+            CompressMode::AdaptiveFocus(n) => self.apply_afm_compression(uncomprised, n).await?,
+            CompressMode::TopicSegment => self.apply_topic_compression(uncomprised).await?,
+            _ => self.apply_compression(uncomprised, mode).await?,
+        };
         tracing::info!("compress_and_persist: was_compressed={}, info={:?}", was_compressed, info);
         if !was_compressed {
             return Ok(());
@@ -489,6 +500,54 @@ impl ConversationStore {
             .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
 
         self.update_session_stats(session_id).await?;
+
+        // 摘要数量超过 3 条时，合并最老的 2 条
+        if let Err(e) = self.merge_old_summaries(session_id).await {
+            tracing::warn!("合并旧摘要失败: {:?}", e);
+        }
+
+        Ok(())
+    }
+
+    /// 摘要超过 3 条时，合并最老的 2 条为 1 条
+    async fn merge_old_summaries(&self, session_id: &str) -> Result<(), ConversationError> {
+        let summaries: Vec<(String, String, i64)> = sqlx::query(
+            "SELECT id, content, time_created FROM message WHERE session_id = ? AND role = 'summary' ORDER BY time_created"
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ConversationError::SqliteError(e.to_string()))?
+        .into_iter()
+        .map(|r| (r.get::<String, _>(0), r.get::<String, _>(1), r.get::<i64, _>(2)))
+        .collect();
+
+        let max_summaries: usize = 3;
+        if summaries.len() <= max_summaries {
+            return Ok(());
+        }
+
+        // 取最老的 2 条合并
+        let (id1, c1, _) = &summaries[0];
+        let (id2, c2, t2) = &summaries[1];
+        let prompt = format!("合并以下两条对话摘要为一条（100字内），去重保留关键信息：\n\n1: {}\n2: {}", c1, c2);
+        let merged = match self.llm.invoke(vec![Message::human(&prompt)], None).await {
+            Ok(r) => r.content.chars().take(200).collect::<String>(),
+            Err(_) => return Ok(()),
+        };
+
+        // 删除最老的 2 条，插入合并后的
+        sqlx::query("DELETE FROM message WHERE id = ?").bind(id1).execute(&self.pool).await.ok();
+        sqlx::query("DELETE FROM message WHERE id = ?").bind(id2).execute(&self.pool).await.ok();
+        sqlx::query(
+            "INSERT INTO message (id, session_id, role, content, tokens, time_created) VALUES (?, ?, 'summary', ?, ?, ?)"
+        )
+        .bind(uuid::Uuid::new_v4().to_string()).bind(session_id)
+        .bind(&merged).bind(estimate_tokens(&merged) as i64).bind(t2)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ConversationError::SqliteError(e.to_string()))?;
+
         Ok(())
     }
 

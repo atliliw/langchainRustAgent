@@ -86,15 +86,20 @@ impl AgentEngine {
 
         // 收集依赖信息（先拷贝，避免借用冲突）
         let deps_list: Vec<(String, Vec<String>)> = agent_tasks.iter().map(|t| (t.name.clone(), t.depends_on.clone())).collect();
+        // 链式边（保证遍历顺序）+ 依赖边
         let mut seen = std::collections::HashSet::<(String,String)>::new();
-        let l0: Vec<String> = agent_tasks.iter().filter(|t| !t.depends_on.iter().any(|d| ns.contains(d.as_str()))).map(|t| t.name.clone()).collect();
-        if l0.len()==1 { graph.add_edge(START, &l0[0]); seen.insert((START.to_string(),l0[0].clone())); }
-        else if !l0.is_empty() { graph.add_fan_out(START, l0); graph.set_entry_point(&agent_tasks[0].name); }
-        else { graph.add_edge(START, &agent_tasks[0].name); seen.insert((START.to_string(),agent_tasks[0].name.clone())); }
+        graph.add_edge(START, &agent_tasks[0].name);
+        seen.insert((START.to_string(), agent_tasks[0].name.clone()));
+        for i in 1..agent_tasks.len() {
+            let k = (agent_tasks[i-1].name.clone(), agent_tasks[i].name.clone());
+            if seen.insert(k) { graph.add_edge(&agent_tasks[i-1].name, &agent_tasks[i].name); }
+        }
 
         for (name, deps) in &deps_list {
             for d in deps { if ns.contains(d.as_str()) { let k=(d.clone(),name.clone()); if seen.insert(k) { graph.add_edge(d, name); } } }
         }
+
+        // 不被依赖的节点 → END
         let refd: std::collections::HashSet<&str> = deps_list.iter().flat_map(|(_,deps)| deps.iter().map(|d| d.as_str())).filter(|d| ns.contains(d)).collect();
         for (name, _) in &deps_list { if !refd.contains(name.as_str()) { let k=(name.clone(),END.to_string()); if seen.insert(k) { graph.add_edge(name, END); } } }
 
