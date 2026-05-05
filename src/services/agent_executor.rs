@@ -122,7 +122,7 @@ impl AgentEngine {
         })
     }
 
-    /// ── 2. 执行：按依赖拓扑执行，上下文传递 ──
+    /// ── 2. 执行：用 StateGraph 管理状态和上下文传递 ──
     pub async fn execute(
         config: &Config,
         task: String,
@@ -133,90 +133,92 @@ impl AgentEngine {
             OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024))
         );
 
-        let name_set: HashSet<&str> = agent_tasks.iter().map(|t| t.name.as_str()).collect();
-        let mut results: HashMap<String, AgentExecResult> = HashMap::new();
-        let mut completed: HashSet<String> = HashSet::new();
-        let max_rounds = agent_tasks.len() * 2;
+        use langchainrust::{
+            StateGraph, START, END,
+            AgentState, StateUpdate,
+            CompiledGraph,
+        };
 
-        for _round in 0..max_rounds {
-            if completed.len() >= agent_tasks.len() { break; }
+        // 动态构建 StateGraph
+        let mut graph: StateGraph<AgentState> = StateGraph::new();
+        let name_set: std::collections::HashSet<&str> =
+            agent_tasks.iter().map(|t| t.name.as_str()).collect();
 
-            let ready: Vec<&AgentTask> = agent_tasks.iter().filter(|t| {
-                if completed.contains(&t.name) { return false; }
-                t.depends_on.iter()
-                    .filter(|d| name_set.contains(d.as_str()))
-                    .all(|d| completed.contains(d))
-            }).collect();
+        // 每个子任务作为一个 async node
+        for at in &agent_tasks {
+            let node_name = at.name.clone();
+            let desc = at.description.clone();
+            let tool = at.tool.clone();
+            let template = at.input_template.clone();
+            let l = llm.clone();
+            let t = task.clone();
 
-            if ready.is_empty() { break; }
+            graph.add_async_node(node_name.clone(), move |state: &AgentState| {
+                let s = state.clone();
+                let n = node_name.clone();
+                let d = desc.clone();
+                let tool = tool.clone();
+                let tmpl = template.clone();
+                let l = l.clone();
+                let t = t.clone();
+                async move {
+                    // 从 state.messages 中提取前置结果
+                    let ctx: String = s.messages.iter()
+                        .map(|m| format!("[{}]: {}", match m.role { langchainrust::MessageRole::AI => "AI", _ => "User" }, m.content))
+                        .collect::<Vec<_>>().join("\n");
 
-            let mut handles = Vec::new();
-            for at in ready {
-                let n = at.name.clone();
-                let desc = at.description.clone();
-                let tool = at.tool.clone();
-                let template = at.input_template.clone();
-                let l = llm.clone();
-                let t = task.clone();
-                let ctx: HashMap<String, String> = completed.iter()
-                    .filter_map(|c| results.get(c))
-                    .map(|r| (r.task_name.clone(), r.output.clone()))
-                    .collect();
-
-                handles.push(tokio::spawn(async move {
-                    let start = Instant::now();
-                    let context_summary: String = if ctx.is_empty() {
-                        "无前置结果".into()
-                    } else {
-                        ctx.iter().map(|(k, v)| format!("[{}]: {}", k, v)).collect::<Vec<_>>().join("\n")
-                    };
-
-                    let exec_prompt = format!(
-                        r#"任务：{t}
-当前子任务：{desc}
-使用的工具：{tool}
-输入说明：{template}
-
-前置结果：
-{context_summary}
-
-请用{tool}工具执行这个子任务并输出结果。"#,
-                        t = t, desc = desc, tool = tool,
-                        template = template, context_summary = context_summary,
+                    let prompt = format!(
+                        "任务：{t}\n当前子任务：{d}\n工具：{tool}\n输入：{tmpl}\n\n已完成的任务结果：\n{ctx}\n\n请输出结果。",
+                        t = t, d = d, tool = tool, tmpl = tmpl, ctx = ctx,
                     );
 
-                    let (output, tokens) = match l.invoke(vec![Message::human(&exec_prompt)], None).await {
-                        Ok(r) => {
-                            let tok = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
-                            (r.content.chars().take(500).collect::<String>(), tok)
-                        }
-                        Err(e) => (format!("执行失败: {}", e), 0),
-                    };
+                    let resp = l.invoke(vec![Message::human(&prompt)], None).await
+                        .map_err(|e| langchainrust::langgraph::GraphError::NodeError(e.to_string()))?;
 
-                    AgentExecResult {
-                        task_name: n.clone(),
-                        tool: tool.clone(),
-                        input_summary: template,
-                        output,
-                        duration_ms: start.elapsed().as_millis() as u64,
-                        tokens,
-                    }
-                }));
-            }
-
-            for h in handles {
-                if let Ok(r) = h.await {
-                    let name = r.task_name.clone();
-                    completed.insert(name);
-                    results.insert(r.task_name.clone(), r);
+                    let output = resp.content.chars().take(500).collect::<String>();
+                    let mut new_state = s;
+                    new_state.add_message(langchainrust::MessageEntry::ai(format!("[{}] {}", n, output)));
+                    new_state.add_step(langchainrust::StepEntry::new(n, output.clone()));
+                    Ok(StateUpdate::full(new_state))
                 }
-            }
+            });
         }
 
-        // 收集结果
-        let exec_results: Vec<AgentExecResult> = agent_tasks.iter()
-            .filter_map(|t| results.get(&t.name).cloned())
-            .collect();
+        // 建边：链式保证可达 + 依赖边
+        graph.add_edge(START, &agent_tasks[0].name);
+        for i in 1..agent_tasks.len() {
+            graph.add_edge(&agent_tasks[i-1].name, &agent_tasks[i].name);
+        }
+        for at in &agent_tasks {
+            for dep in &at.depends_on {
+                if name_set.contains(dep.as_str()) {
+                    graph.add_edge(dep, &at.name);
+                }
+            }
+            graph.add_edge(&at.name, END);
+        }
+
+        let compiled = graph.compile()
+            .map_err(|e| GraphDemoError::BuildError(e.to_string()))?;
+
+        // 执行图
+        let initial = AgentState::new(task.clone());
+        let result = compiled.invoke(initial).await
+            .map_err(|e| GraphDemoError::ExecutionError(e.to_string()))?;
+
+        // 从 state.steps 中提取执行结果
+        let exec_results: Vec<AgentExecResult> = result.final_state.steps.iter()
+            .filter_map(|step| {
+                let at = agent_tasks.iter().find(|t| t.name == step.action)?;
+                Some(AgentExecResult {
+                    task_name: step.action.clone(),
+                    tool: at.tool.clone(),
+                    input_summary: at.input_template.clone(),
+                    output: step.observation.clone(),
+                    duration_ms: 0,
+                    tokens: 0,
+                })
+            }).collect();
 
         // ── 3. 验证 + 最终汇总 ──
         let verifier_llm = OpenAIChat::new(
