@@ -420,6 +420,18 @@ impl ApiService {
         Ok(TaskExecuteResult { execution_results: results })
     }
     
+    /// ──────────────────── 真实 Agent 系统 ────────────────────
+    
+    pub async fn agent_plan(&self, task: String) -> Result<AgentPlan, ApiError> {
+        crate::services::agent_executor::AgentEngine::plan(&self.config, task).await
+            .map_err(|e| ApiError::SearchError(e.to_string()))
+    }
+    
+    pub async fn agent_execute(&self, task: String, agent_tasks: Vec<AgentTask>) -> Result<AgentExecResponse, ApiError> {
+        crate::services::agent_executor::AgentEngine::execute(&self.config, task, agent_tasks).await
+            .map_err(|e| ApiError::SearchError(e.to_string()))
+    }
+    
     /// ──────────────────── API统计 ────────────────────
     
     pub async fn get_api_stats(&self) -> Result<ApiStatsSummary, ApiError> {

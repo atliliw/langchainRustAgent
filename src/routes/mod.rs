@@ -125,6 +125,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         
         .route("/api/langgraph/execute", axum::routing::post(langgraph::execute_sub_tasks))
         // 执行子任务（LLM 逐个执行 + token 统计）
+        
+        .route("/api/agent/plan", axum::routing::post(langgraph::agent_plan))
+        // 真实Agent规划（LLM拆解+分配工具）
+        
+        .route("/api/agent/execute", axum::routing::post(langgraph::agent_execute))
+        // 真实Agent执行（工具调用+上下文传递+验证）
 
         // ────────────────────── 文档管理 ──────────────────────
         .route("/api/documents", axum::routing::get(document::list_documents))

@@ -111,3 +111,58 @@ pub struct StateSnapshot {
     pub output: Option<String>,
     pub messages: Vec<String>,
 }
+
+/// ──────── 真实 Agent 系统模型 ────────
+
+/// 工具定义
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ToolDef {
+    pub name: String,
+    pub description: String,
+    pub parameters: Vec<ToolParam>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ToolParam {
+    pub name: String,
+    pub r#type: String,
+    pub description: String,
+}
+
+/// Agent 规划中的单个任务节点
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AgentTask {
+    pub name: String,
+    pub description: String,
+    pub tool: String,
+    pub depends_on: Vec<String>,
+    pub input_template: String,
+}
+
+/// Agent 规划结果
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AgentPlan {
+    pub original_task: String,
+    pub tasks: Vec<AgentTask>,
+    pub graph_structure: serde_json::Value,
+}
+
+/// Agent 执行结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentExecResult {
+    pub task_name: String,
+    pub tool: String,
+    pub input_summary: String,
+    pub output: String,
+    pub duration_ms: u64,
+    pub tokens: usize,
+}
+
+/// Agent 执行响应
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AgentExecResponse {
+    pub results: Vec<AgentExecResult>,
+    pub final_answer: String,
+    pub total_duration_ms: u64,
+    pub total_tokens: usize,
+}

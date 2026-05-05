@@ -417,7 +417,7 @@ impl LangGraphDemoService {
         task: String,
     ) -> Result<TaskDecomposeResult, GraphDemoError> {
         let llm = OpenAIChat::new(
-            config.to_langchain_openai_config().with_max_tokens(1024)
+            config.to_langchain_openai_config().with_max_tokens(512)
         );
 
         let prompt = format!(
@@ -425,7 +425,7 @@ impl LangGraphDemoService {
 
 返回 JSON，格式：
 [
-  {{"name": "子任务名（英文）", "description": "子任务描述（中文）", "depends_on": ["前置任务名"]}}
+  {{"name": "子任务名（中文简短，不要英文）", "description": "子任务描述（中文）", "depends_on": ["前置任务名"]}}
 ]
 
 用户任务：{task}
@@ -470,8 +470,7 @@ impl LangGraphDemoService {
             seen.insert(k);
             graph.add_edge(&sub_tasks[i-1].name, &sub_tasks[i].name);
         }
-        graph.add_edge(&sub_tasks.last().unwrap().name, END);
-
+        // 依赖边
         for sub in &sub_tasks {
             for dep in &sub.depends_on {
                 if name_set.contains(dep.as_str()) {
@@ -482,6 +481,8 @@ impl LangGraphDemoService {
                 }
             }
         }
+
+        // 全部 → END（含去重）
         for sub in &sub_tasks {
             let k = (sub.name.clone(), END.to_string());
             if seen.insert(k) {
@@ -501,76 +502,60 @@ impl LangGraphDemoService {
 
     /// ──────────────────── 执行子任务 ────────────────────
     ///
-    /// 按依赖顺序依次执行每个子任务，返回结果 + token 统计
+    /// 单次 LLM 调用执行所有子任务（比逐个并行调快得多）
     pub async fn execute_sub_tasks(
         config: &Config,
         task: String,
         sub_tasks: Vec<SubTaskDef>,
     ) -> Result<Vec<SubTaskExecResult>, GraphDemoError> {
-        let llm = Arc::new(
-            OpenAIChat::new(
-                config.to_langchain_openai_config().with_max_tokens(1024)
-            )
+        let llm = OpenAIChat::new(
+            config.to_langchain_openai_config().with_max_tokens(1024)
         );
 
-        let name_set: std::collections::HashSet<&str> =
-            sub_tasks.iter().map(|s| s.name.as_str()).collect();
-        let mut results: Vec<SubTaskExecResult> = Vec::new();
-        let mut completed: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let max_rounds = sub_tasks.len() * 2;
+        let task_list: String = sub_tasks.iter()
+            .map(|s| format!("- {}: {}", s.name, s.description))
+            .collect::<Vec<_>>().join("\n");
 
-        for _round in 0..max_rounds {
-            if results.len() >= sub_tasks.len() { break; }
+        let prompt = format!(
+            r#"请依次执行以下子任务，为每个子任务输出结果。
 
-            let ready: Vec<&SubTaskDef> = sub_tasks.iter().filter(|sub| {
-                if completed.contains(&sub.name) { return false; }
-                sub.depends_on.iter()
-                    .filter(|d| name_set.contains(d.as_str()))
-                    .all(|d| completed.contains(d))
-            }).collect();
+任务：{task}
 
-            if ready.is_empty() { break; }
+子任务列表：
+{task_list}
 
-            let mut handles = Vec::new();
-            for sub in ready {
-                let desc = sub.description.clone();
-                let n = sub.name.clone();
-                let l = llm.clone();
-                let t = task.clone();
-                handles.push(tokio::spawn(async move {
-                    let start = Instant::now();
-                    let prompt = format!(
-                        "任务：{t}\n子任务：{desc}\n\n请执行这个子任务。",
-                        t = t, desc = desc,
-                    );
-                    match l.invoke(vec![Message::human(&prompt)], None).await {
-                        Ok(r) => {
-                            let tokens = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
-                            SubTaskExecResult {
-                                name: n,
-                                output: r.content.chars().take(200).collect(),
-                                duration_ms: start.elapsed().as_millis() as u64,
-                                tokens,
-                            }
-                        }
-                        Err(e) => SubTaskExecResult {
-                            name: n, output: format!("执行失败: {}", e),
-                            duration_ms: 0, tokens: 0,
-                        },
-                    }
-                }));
-            }
+返回 JSON 数组，格式：
+[
+  {{"name": "子任务名", "output": "执行结果"}}
+]
 
-            for h in handles {
-                if let Ok(r) = h.await {
-                    let name = r.name.clone();
-                    completed.insert(name);
-                    results.push(r);
-                }
-            }
-        }
+只返回 JSON。"#,
+            task = task, task_list = task_list,
+        );
 
-        Ok(results)
+        let start = Instant::now();
+        let resp = llm.invoke(vec![Message::human(&prompt)], None)
+            .await.map_err(|e| GraphDemoError::ExecutionError(format!("LLM 失败: {}", e)))?;
+
+        let total_tokens = resp.token_usage.as_ref().map(|u| u.total_tokens as u64).unwrap_or(0);
+        let cleaned = resp.content
+            .trim_start_matches("```json").trim_start_matches("```")
+            .trim_end_matches("```").trim();
+
+        let exec_results: Vec<SubTaskExecResult> = serde_json::from_str(cleaned)
+            .map_err(|e| GraphDemoError::BuildError(format!(
+                "LLM 返回格式错误: {} — 原始内容: {}",
+                e, &cleaned.chars().take(300).collect::<String>()
+            )))?;
+
+        let elapsed = start.elapsed().as_millis() as u64;
+        let count = std::cmp::max(1, exec_results.len()) as u64;
+
+        Ok(exec_results.into_iter().map(|mut r| {
+            r.duration_ms = elapsed / count;
+            r.tokens = (total_tokens / count) as usize;
+            r
+        }).collect())
     }
 }
 

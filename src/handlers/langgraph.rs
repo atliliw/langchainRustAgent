@@ -88,3 +88,31 @@ pub async fn execute_sub_tasks(
     let result = state.api.execute_sub_tasks(request.task, request.sub_tasks).await?;
     Ok(Json(result))
 }
+
+/// ──────── 真实 Agent 系统 ────────
+
+/// Agent 规划
+/// POST /api/agent/plan
+pub async fn agent_plan(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<TaskDecomposeRequest>,
+) -> Result<Json<AgentPlan>, ApiErrorResponse> {
+    let result = state.api.agent_plan(request.task).await?;
+    Ok(Json(result))
+}
+
+/// Agent 执行
+/// POST /api/agent/execute
+pub async fn agent_execute(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<serde_json::Value>,
+) -> Result<Json<AgentExecResponse>, ApiErrorResponse> {
+    let task = request["task"].as_str().unwrap_or("").to_string();
+    let tasks: Vec<AgentTask> = serde_json::from_value(request["agent_tasks"].clone())
+        .map_err(|_| ApiErrorResponse(
+            axum::http::StatusCode::BAD_REQUEST,
+            "agent_tasks 格式错误".to_string(),
+        ))?;
+    let result = state.api.agent_execute(task, tasks).await?;
+    Ok(Json(result))
+}

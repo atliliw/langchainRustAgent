@@ -6,7 +6,8 @@
 
 pub mod api_service;          // 核心 API 服务
 pub mod langgraph_service;    // LangGraph 状态图演示
-pub mod aggregate_service;    // Agent 数据采集
+pub mod aggregate_service;    // AI 聚合采集
+pub mod agent_executor;       // 真实 Agent 执行引擎
 
 pub use api_service::ApiService;
 pub use langgraph_service::LangGraphDemoService;

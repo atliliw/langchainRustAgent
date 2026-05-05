@@ -1440,6 +1440,115 @@ async function loadDocumentsByTag(tag) {
     } catch (e) { showToast('加载失败: ' + e.message); }
 }
 
+let _agentPlanData = null;
+
+async function runAgentPlan() {
+    const task = document.getElementById('agent-input').value.trim();
+    if (!task) { showToast('请输入任务'); return; }
+    const viz = document.getElementById('agent-viz');
+    const container = document.getElementById('agent-container');
+    const detail = document.getElementById('agent-plan-detail');
+    const results = document.getElementById('agent-results');
+
+    viz.style.display = 'block'; detail.style.display = 'none';
+    document.getElementById('agent-graph-title').textContent = '🤖 规划中...';
+    container.innerHTML = '<div style="text-align:center;color:#94a3b8;padding:30px;">⏳ LLM 规划中...</div>';
+    results.innerHTML = '';
+
+    try {
+        const res = await fetch(`${API_BASE}/agent/plan`, {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({task})
+        });
+        if (!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.error||`${res.status}`); }
+        const data = await res.json();
+        _agentPlanData = data;
+
+        document.getElementById('agent-graph-title').textContent = `📋 ${escapeHtml(data.original_task)}`;
+        container.innerHTML = renderGraphHtml(data.graph_structure, {});
+
+        let html = `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;margin-top:10px;">
+            <table style="width:100%;border-collapse:collapse;">
+            <thead><tr style="background:#f5f3ff;">
+                <th style="padding:8px;border:1px solid #e2e8f0;">任务</th>
+                <th style="padding:8px;border:1px solid #e2e8f0;">工具</th>
+                <th style="padding:8px;border:1px solid #e2e8f0;">依赖</th>
+                <th style="padding:8px;border:1px solid #e2e8f0;">输入说明</th>
+            </tr></thead>
+            <tbody>`;
+        data.tasks.forEach(t => {
+            html += `<tr>
+                <td style="padding:8px;border:1px solid #e2e8f0;"><strong>${escapeHtml(t.name)}</strong><br><span style="font-size:12px;color:#64748b;">${escapeHtml(t.description)}</span></td>
+                <td style="padding:8px;border:1px solid #e2e8f0;"><span style="background:#ede9fe;padding:2px 8px;border-radius:4px;font-size:12px;">${escapeHtml(t.tool)}</span></td>
+                <td style="padding:8px;border:1px solid #e2e8f0;font-size:12px;">${(t.depends_on||[]).join(', ') || '无'}</td>
+                <td style="padding:8px;border:1px solid #e2e8f0;font-size:12px;color:#475569;">${escapeHtml(t.input_template)}</td>
+            </tr>`;
+        });
+        html += `</tbody></table></div>`;
+        results.innerHTML = html;
+        detail.style.display = 'block';
+    } catch (e) {
+        container.innerHTML = `<div style="color:#e94560;text-align:center;padding:20px;">${e.message}</div>`;
+    }
+}
+
+async function runAgentExecute() {
+    if (!_agentPlanData) return;
+    const results = document.getElementById('agent-results');
+    results.innerHTML = '<div style="text-align:center;color:#94a3b8;padding:20px;">⏳ 执行中...</div>';
+
+    try {
+        const res = await fetch(`${API_BASE}/agent/execute`, {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({
+                task: _agentPlanData.original_task,
+                agent_tasks: _agentPlanData.tasks
+            })
+        });
+        if (!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.error||`${res.status}`); }
+        const data = await res.json();
+
+        // 更新图注解
+        const annotations = {};
+        (data.results || []).forEach(r => { annotations[r.task_name] = {label: r.output.substring(0,50), ms: r.duration_ms}; });
+        document.getElementById('agent-container').innerHTML = renderGraphHtml(_agentPlanData.graph_structure, annotations);
+
+        let html = `<h3 style="color:#7c3aed;margin-top:20px;">✅ 执行完成</h3>`;
+        html += `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;">
+            <table style="width:100%;border-collapse:collapse;">
+            <thead><tr style="background:#f5f3ff;">
+                <th style="padding:8px;border:1px solid #e2e8f0;">任务</th>
+                <th style="padding:8px;border:1px solid #e2e8f0;">工具</th>
+                <th style="padding:8px;border:1px solid #e2e8f0;">输出</th>
+                <th style="padding:8px;border:1px solid #e2e8f0;">耗时</th>
+                <th style="padding:8px;border:1px solid #e2e8f0;">Token</th>
+            </tr></thead>
+            <tbody>`;
+        (data.results || []).forEach(r => {
+            html += `<tr>
+                <td style="padding:8px;border:1px solid #e2e8f0;">${escapeHtml(r.task_name)}</td>
+                <td style="padding:8px;border:1px solid #e2e8f0;"><span style="background:#ede9fe;padding:2px 8px;border-radius:4px;font-size:12px;">${escapeHtml(r.tool)}</span></td>
+                <td style="padding:8px;border:1px solid #e2e8f0;font-size:12px;">${escapeHtml(r.output)}</td>
+                <td style="padding:8px;border:1px solid #e2e8f0;">${r.duration_ms}ms</td>
+                <td style="padding:8px;border:1px solid #e2e8f0;">${r.tokens}</td>
+            </tr>`;
+        });
+        html += `</tbody></table></div>`;
+
+        if (data.final_answer) {
+            html += `<div style="background:#f5f3ff;border:1px solid #c4b5fd;border-radius:8px;padding:15px;margin-top:15px;">
+                <h4 style="color:#7c3aed;margin:0 0 10px 0;">🎯 最终答案</h4>
+                <div style="color:#1e293b;font-size:14px;line-height:1.6;">${escapeHtml(data.final_answer)}</div>
+            </div>`;
+        }
+
+        html += `<p style="margin-top:10px;color:#64748b;font-size:13px;">总计: ${data.total_duration_ms}ms | ${data.total_tokens} tokens</p>`;
+        results.innerHTML = html;
+    } catch (e) {
+        results.innerHTML = `<div style="color:#e94560;text-align:center;padding:20px;">${e.message}</div>`;
+    }
+}
+
 document.addEventListener('DOMContentLoaded', function() {
     const uploadArea = document.getElementById('upload-area');
     const fileInput = document.getElementById('file-input');
