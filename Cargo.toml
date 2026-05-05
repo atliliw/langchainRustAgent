@@ -61,7 +61,7 @@ sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio", "tls-rustls"] }
 qdrant-client = "1.17"
 
 # LangChainRust framework (local crate)
-langchainrust = { git = "https://github.com/atliliw/langchainrust.git", tag = "v0.2.19", features = ["qdrant-integration", "mongodb-persistence"] }
+langchainrust = { version = "0.2.19", features = ["qdrant-integration", "mongodb-persistence"] }
 
 [features]
 default = []
