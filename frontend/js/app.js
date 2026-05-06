@@ -1502,38 +1502,69 @@ async function agentStepExecute() {
 }
 
 async function agentNextBatch() {
+    document.querySelectorAll('#agent-results button').forEach(b => b.remove());
+    const el = document.createElement('div');
+    el.id = 'batch-loading';
+    el.style.cssText = 'text-align:center;padding:20px;color:#8b5cf6;';
+    el.textContent = '⏳ 执行中...';
+    document.getElementById('agent-results').appendChild(el);
     await agentFetchAndShow(false);
 }
 
 async function agentFetchAndShow(isFirst) {
     const resDiv = document.getElementById('agent-results');
-    resDiv.innerHTML = '<div style="text-align:center;padding:30px;color:#8b5cf6;">⏳ 执行中...</div>';
+    if (isFirst) {
+        resDiv.innerHTML = '<div style="text-align:center;padding:30px;color:#8b5cf6;">⏳ 执行中...</div>';
+    }
+    // 非第一步不重置内容，保留已有结果
 
     try {
-        const res = await fetch('/api/agent/execute', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({task: _agentPlanData.original_task, agent_tasks: _agentPlanData.tasks})
-        });
+        const url = isFirst ? '/api/agent/execute' : '/api/agent/next';
+        const body = isFirst
+            ? JSON.stringify({task: _agentPlanData.original_task, agent_tasks: _agentPlanData.tasks})
+            : JSON.stringify({session_id: _agentSessionId});
+
+        const res = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body});
         const data = await res.json();
         if (!res.ok) { throw new Error(data.error || '失败'); }
-        const results = data.results || [];
+
+        if (isFirst) _agentSessionId = data.session_id;
+        (data.results || []).forEach(r => _agentAllResults.push(r));
 
         const annotations = {};
-        results.forEach(r => { annotations[r.task_name] = {label: r.output.substring(0,30), ms: 0}; });
+        _agentAllResults.forEach(r => { annotations[r.task_name] = {label: r.output.substring(0,30), ms: 0}; });
         document.getElementById('agent-container').innerHTML = renderGraphHtml(_agentPlanData.graph_structure, annotations);
 
-        let html = '<div style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;margin-top:10px;">';
+        let html = '<div id="agent-results-table" style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;margin-top:10px;">';
         html += '<table style="width:100%"><thead><tr style="background:#f5f3ff;"><th>任务</th><th>输出</th><th style="width:100px;">消耗</th></tr></thead><tbody>';
-        results.forEach(r => {
+        _agentAllResults.forEach(r => {
             html += '<tr><td style="padding:8px;font-weight:bold;">' + escapeHtml(r.task_name) + '</td>';
             html += '<td style="padding:8px;font-size:13px;">' + escapeHtml(r.output) + '</td>';
             html += '<td style="padding:4px;font-size:11px;color:#94a3b8;text-align:right;">' + (r.duration_ms||0) + 'ms | ' + (r.tokens||0) + 't</td></tr>';
         });
         html += '</tbody></table>';
-        if (data.final_answer) html += '<div style="background:#f5f3ff;padding:10px;margin-top:10px;">🎯 ' + escapeHtml(data.final_answer) + '</div>';
-        html += '<p style="color:#64748b;font-size:13px;">总计: ' + (data.total_duration_ms||0) + 'ms | ' + (data.total_tokens||0) + ' tokens</p>';
-        html += '</div>';
-        resDiv.innerHTML = html;
+
+        // 替换或追加到已有结果
+        if (isFirst) {
+            html += '<div style="padding:10px;text-align:center;">'
+                + (data.has_next
+                    ? '<button class="btn" onclick="agentNextBatch()" style="background:#8b5cf6;color:white;width:100%;padding:12px;">▶ 下一步 (' + _agentAllResults.length + '/' + _agentPlanData.tasks.length + ')</button>'
+                    : '<span style="color:#10b981;font-weight:bold;">✅ 全部完成</span>')
+                + '</div></div>';
+            resDiv.innerHTML = html;
+        } else {
+            // 移除加载指示器和旧按钮
+            document.querySelectorAll('#batch-loading, #agent-results .btn, #agent-results span').forEach(el => el.remove());
+            // 追加新按钮
+            let footer = document.createElement('div');
+            footer.style.cssText = 'padding:10px;text-align:center;';
+            if (data.has_next) {
+                footer.innerHTML = '<button class="btn" onclick="agentNextBatch()" style="background:#8b5cf6;color:white;width:100%;padding:12px;">▶ 下一步 (' + _agentAllResults.length + '/' + _agentPlanData.tasks.length + ')</button>';
+            } else {
+                footer.innerHTML = '<span style="color:#10b981;font-weight:bold;">✅ 全部完成</span>';
+            }
+            document.getElementById('agent-results-table').appendChild(footer);
+        }
     } catch (e) {
         resDiv.innerHTML = '<div style="color:#e94560;padding:20px;">❌ ' + escapeHtml(e.message) + '</div>';
     }

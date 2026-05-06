@@ -104,12 +104,12 @@ pub async fn agent_plan(
 pub async fn agent_execute(
     State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
-) -> Result<Json<AgentExecResponse>, ApiErrorResponse> {
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
     let task = request["task"].as_str().unwrap_or("").to_string();
     let tasks: Vec<AgentTask> = serde_json::from_value(request["agent_tasks"].clone())
         .unwrap_or_default();
-    let result = state.api.agent_execute_all(task, tasks).await?;
-    Ok(Json(result))
+    let (sid, results, has_next) = state.api.agent_batch_start(task, tasks).await?;
+    Ok(Json(serde_json::json!({"session_id":sid,"results":results,"has_next":has_next})))
 }
 
 pub async fn agent_next(
