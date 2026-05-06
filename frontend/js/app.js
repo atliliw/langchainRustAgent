@@ -1533,7 +1533,15 @@ async function agentFetchAndShow(isFirst) {
                     ? '<button class="btn" onclick="agentNextBatch()" style="background:#8b5cf6;color:white;width:100%;padding:12px;">▶ 下一步 (' + _agentAllResults.length + '/' + _agentPlanData.tasks.length + ')</button>'
                     : '<span style="color:#10b981;font-weight:bold;">✅ 全部完成</span>')
                 + '</div></div>';
-            resDiv.innerHTML = html;
+            let existArea = document.getElementById('agent-exec-area');
+            if (existArea) {
+                existArea.innerHTML = html;
+            } else {
+                let div = document.createElement('div');
+                div.id = 'agent-exec-area';
+                div.innerHTML = html;
+                resDiv.appendChild(div);
+            }
         } else {
             document.querySelectorAll('#batch-loading').forEach(el => el.remove());
             const tbody = document.querySelector('#agent-results-table tbody');

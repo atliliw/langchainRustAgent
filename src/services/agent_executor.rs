@@ -9,7 +9,7 @@ use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
-    ("llm_query","直接用 LLM 回答"),("web_search","搜索网络"),("weather","查询天气"),
+    ("llm_query","直接用 LLM 回答"),("web_search","搜索网络获取信息"),("weather","查询天气"),
     ("code_execute","执行代码"),("read_file","读取文件"),("summarize","总结"),
 ];
 
@@ -124,9 +124,6 @@ impl AgentEngine {
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(512));
         let ctx: String = context.iter().map(|r| format!("【{}】\n{}", r.task_name, r.output)).collect::<Vec<_>>().join("\n\n");
 
-        use langchainrust::{BaseTool, DuckDuckGoSearchTool};
-        let search = DuckDuckGoSearchTool::new();
-
         // 天气查询（用 wttr.in，免费无需 Key）
         async fn query_weather(city: &str) -> Result<String, String> {
             let e: String = city.chars().map(|c| match c { 'A'..='Z'|'a'..='z'|'0'..='9'|'-'|'_'|'.'|'~' => c.to_string(), _ => format!("%{:02X}",c as u8) }).collect();
@@ -140,24 +137,12 @@ impl AgentEngine {
 
             let (output, tokens) = match at.tool.as_str() {
                 "web_search" => {
-                    let q_prompt = format!("任务：{}\n当前子任务：{}\n\n请输出搜索关键词（一句话），不要多余内容。", task, at.description);
-                    let q = llm.invoke(vec![Message::human(&q_prompt)], None).await
-                        .map(|r| r.content.trim().to_string())
-                        .unwrap_or_else(|_| at.description.clone());
-                    let json_input = format!("{{\"query\":\"{}\",\"top_k\":3}}", q.replace('"', ""));
-                    let search_result = search.run(json_input).await;
-                    let search_ok = matches!(&search_result, Ok(r) if !r.trim().is_empty() && !r.contains("未找到"));
-                    match search_result {
-                        Ok(r) if search_ok => (r, 0),
-                        _ => {
-                            // 搜索失败，降级到 LLM
-                            let fallback = format!("任务：{}\n子任务：{}\n（搜索不可用，请直接回答）\n\n请基于你的知识回答。", task, at.description);
-                            let r = llm.invoke(vec![Message::human(&fallback)], None).await;
-                            match r {
-                                Ok(resp) => (resp.content.clone(), resp.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0)),
-                                Err(e) => (format!("执行失败: {}", e), 0),
-                            }
-                        }
+                    // 搜索降级到 LLM（搜索工具不稳定，直接让 LLM 回答）
+                    let p = format!("任务：{}\n当前子任务：{}\n\n请基于你的知识回答。", task, at.description);
+                    let resp = llm.invoke(vec![Message::human(&p)], None).await;
+                    match resp {
+                        Ok(r) => (r.content.clone(), r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0)),
+                        Err(e) => (format!("执行失败: {}", e), 0),
                     }
                 }
                 "weather" => {
