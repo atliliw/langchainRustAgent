@@ -1496,31 +1496,22 @@ async function runAgentPlan() {
 
 async function agentStepExecute() {
     if (!_agentPlanData) return;
+    const resDiv = document.getElementById('agent-results');
 
-    // 禁用所有按钮 + 显示执行中
-    document.querySelectorAll('#agent-results button').forEach(b => {
-        b.disabled = true;
-        b.textContent = '⏳ 执行中...';
-        b.style.opacity = '0.6';
-    });
-    showToast('正在执行...');
+    // 显示加载
+    resDiv.innerHTML = `<div style="text-align:center;padding:30px;color:#8b5cf6;font-size:16px;">⏳ 执行中（约10-15秒）...</div>`;
 
     try {
-        const url = _agentSessionId ? `${API_BASE}/agent/next` : `${API_BASE}/agent/execute`;
-        const body = _agentSessionId
-            ? JSON.stringify({session_id: _agentSessionId})
-            : JSON.stringify({task: _agentPlanData.original_task, agent_tasks: _agentPlanData.tasks});
-
-        const res = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body});
+        const res = await fetch(`${API_BASE}/agent/execute`, {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({task: _agentPlanData.original_task})
+        });
         if (!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.error||`${res.status}`); }
-        const step = await res.json();
-
-        _agentSessionId = step.session_id;
-        _agentResults.push(step.result);
+        const data = await res.json();
 
         // 更新图注解
         const annotations = {};
-        _agentResults.forEach(r => { annotations[r.task_name] = {label: r.output.substring(0,50), ms: r.duration_ms}; });
+        (data.results || []).forEach(r => { annotations[r.task_name] = {label: r.output.substring(0,40), ms: 0}; });
         document.getElementById('agent-container').innerHTML = renderGraphHtml(_agentPlanData.graph_structure, annotations);
 
         // 显示结果
@@ -1529,66 +1520,27 @@ async function agentStepExecute() {
             <thead><tr style="background:#f5f3ff;">
                 <th style="padding:8px;border:1px solid #e2e8f0;">任务</th>
                 <th style="padding:8px;border:1px solid #e2e8f0;">输出</th>
-                <th style="padding:8px;border:1px solid #e2e8f0;">耗时</th>
             </tr></thead><tbody>`;
-        _agentResults.forEach(r => {
+        (data.results || []).forEach(r => {
             html += `<tr>
                 <td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;">${escapeHtml(r.task_name)}</td>
                 <td style="padding:8px;border:1px solid #e2e8f0;font-size:13px;">${escapeHtml(r.output)}</td>
-                <td style="padding:8px;border:1px solid #e2e8f0;">${r.duration_ms}ms</td>
             </tr>`;
         });
         html += `</tbody></table>`;
 
-        if (step.has_next) {
-            html += `<div style="display:flex;gap:10px;margin-top:15px;">
-                <button class="btn" onclick="agentStepExecute()" style="background:#8b5cf6;color:white;flex:1;padding:12px;">▶ 执行下一步</button>
-                <button class="btn" onclick="agentRunAll()" style="background:#6d28d9;color:white;flex:1;padding:12px;">▶▶ 全部执行</button>
+        if (data.final_answer) {
+            html += `<div style="background:#f5f3ff;border:1px solid #c4b5fd;border-radius:8px;padding:15px;margin-top:15px;">
+                <h4 style="color:#7c3aed;margin:0 0 10px 0;">🎯 最终答案</h4>
+                <div style="font-size:14px;line-height:1.6;">${escapeHtml(data.final_answer)}</div>
             </div>`;
-        } else {
-            html += `<button class="btn" onclick="agentFinalize()" style="background:#10b981;color:white;margin-top:15px;padding:12px;width:100%;">✅ 完成验证</button>`;
         }
+
+        html += `<p style="margin-top:10px;color:#64748b;font-size:13px;">总计: ${data.total_duration_ms}ms | ${data.total_tokens} tokens</p>`;
         html += `</div>`;
         resDiv.innerHTML = html;
     } catch (e) {
         resDiv.innerHTML = `<div style="color:#e94560;text-align:center;padding:20px;">❌ ${escapeHtml(e.message)}</div>`;
-    }
-}
-
-async function agentRunAll() {
-    // 连续执行直到完成
-    while (true) {
-        const res = await fetch(`${API_BASE}/agent/next`, {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({session_id: _agentSessionId})
-        });
-        const step = await res.json();
-        _agentResults.push(step.result);
-        if (!step.has_next) break;
-    }
-    const annotations = {};
-    _agentResults.forEach(r => { annotations[r.task_name] = {label: r.output.substring(0,50), ms: r.duration_ms}; });
-    document.getElementById('agent-container').innerHTML = renderGraphHtml(_agentPlanData.graph_structure, annotations);
-    // 自动验证
-    agentFinalize();
-}
-
-async function agentFinalize() {
-    try {
-        const res = await fetch(`${API_BASE}/agent/finalize`, {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({session_id: _agentSessionId})
-        });
-        const data = await res.json();
-        let html = document.getElementById('agent-results').innerHTML;
-        html += `<div style="background:#f5f3ff;border:1px solid #c4b5fd;border-radius:8px;padding:15px;margin-top:15px;">
-            <h4 style="color:#7c3aed;margin:0 0 10px 0;">🎯 最终答案</h4>
-            <div style="color:#1e293b;font-size:14px;line-height:1.6;">${escapeHtml(data.final_answer)}</div>
-            <p style="margin-top:10px;color:#64748b;font-size:13px;">总计: ${data.total_duration_ms}ms | ${data.total_tokens} tokens</p>
-        </div>`;
-        document.getElementById('agent-results').innerHTML = html;
-    } catch (e) {
-        showToast('验证失败: ' + e.message);
     }
 }
 

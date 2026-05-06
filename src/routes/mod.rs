@@ -132,11 +132,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/agent/execute", axum::routing::post(langgraph::agent_execute))
         // 真实Agent开始执行（返回第一个任务结果 + session_id）
         
-        .route("/api/agent/next", axum::routing::post(langgraph::agent_next))
-        // 继续执行下一任务
-        
-        .route("/api/agent/finalize", axum::routing::post(langgraph::agent_finalize))
-        // 完成验证并获取最终答案
+
 
         // ────────────────────── 文档管理 ──────────────────────
         .route("/api/documents", axum::routing::get(document::list_documents))
