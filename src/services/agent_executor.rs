@@ -72,7 +72,7 @@ impl AgentEngine {
         let batch = Self::ready_batch(&agent_tasks, &done);
         if batch.is_empty() { return Err(GraphDemoError::BuildError("没有可执行的任务".into())); }
 
-        let results = Self::run_batch(config, &task, &batch).await?;
+        let results = Self::run_batch(config, &task, &batch, &[]).await?;
         let completed_names: HashSet<String> = results.iter().map(|r| r.task_name.clone()).collect();
 
         let has_more = {
@@ -100,7 +100,11 @@ impl AgentEngine {
         let batch = Self::ready_batch(&all, &done_names);
         if batch.is_empty() { return Err(GraphDemoError::BuildError("没有更多可执行任务".into())); }
 
-        let results = Self::run_batch(config, &task, &batch).await?;
+        let context = {
+            let g = store().lock().unwrap();
+            g.as_ref().unwrap().get(sid).map(|s| s.done.clone()).unwrap_or_default()
+        };
+        let results = Self::run_batch(config, &task, &batch, &context).await?;
         let has_more;
         {
             let mut g = store().lock().unwrap();
@@ -115,19 +119,20 @@ impl AgentEngine {
         Ok((results, has_more))
     }
 
-    /// ── 执行一批任务（逐个执行，不用 spawn） ──
-    async fn run_batch(config: &Config, task: &str, batch: &[AgentTask]) -> Result<Vec<AgentExecResult>, GraphDemoError> {
+    /// ── 执行一批任务，传上下文 ──
+    async fn run_batch(config: &Config, task: &str, batch: &[AgentTask], context: &[AgentExecResult]) -> Result<Vec<AgentExecResult>, GraphDemoError> {
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(512));
+        let ctx: String = context.iter().map(|r| format!("【{}】\n{}", r.task_name, r.output)).collect::<Vec<_>>().join("\n\n");
 
         let mut results = Vec::new();
         for at in batch {
             let start = Instant::now();
-            let p = format!("任务：{}\n子任务：{}\n\n输出结果。", task, at.description);
-            let resp = tokio::time::timeout(Duration::from_secs(30), llm.invoke(vec![Message::human(&p)], None)).await;
+            let p = format!("任务：{}\n当前子任务：{}\n\n前置完成的任务结果：\n{}\n\n请基于前置结果执行当前子任务并输出。", task, at.description, if ctx.is_empty() { "无" } else { &ctx });
+            let resp = tokio::time::timeout(Duration::from_secs(120), llm.invoke(vec![Message::human(&p)], None)).await;
             match resp {
                 Ok(Ok(r)) => results.push(AgentExecResult {
                     task_name: at.name.clone(), tool: String::new(), input_summary: String::new(),
-                    output: r.content.chars().take(200).collect(),
+                    output: r.content.clone(),
                     duration_ms: start.elapsed().as_millis() as u64,
                     tokens: r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0),
                 }),

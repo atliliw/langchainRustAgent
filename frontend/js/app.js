@@ -1190,43 +1190,28 @@ function renderGraphHtml(structure, annotations) {
 }
 
 function renderFlowLevel(nodes, edges, entry, nodeColors, annotations) {
-    const outgoing = {};
-    edges.forEach(e => {
-        const src = e.source === '__start__' ? 'START' : e.source;
-        if (!outgoing[src]) outgoing[src] = [];
-        outgoing[src].push(e);
+    // 用依赖关系计算层级：每个节点的level = 1 + max(level of all depends_on)
+    const edgesJson = JSON.stringify(edges);
+    const depMap = {};  // task name -> level
+    nodes.forEach(n => {
+        // 找这个节点的依赖
+        const deps = edges.filter(e =>
+            e.type === 'fixed' && e.target === n && e.source !== '__start__' && e.target !== '__end__'
+        ).map(e => e.source);
+        // 找它在任务列表中的 depends_on
+        const taskDef = _agentPlanData && _agentPlanData.tasks ? _agentPlanData.tasks.find(t => t.name === n) : null;
+        const realDeps = taskDef ? (taskDef.depends_on || []) : deps;
+        if (!realDeps || realDeps.length === 0) {
+            depMap[n] = 0;
+        } else {
+            depMap[n] = 1 + Math.max(0, ...realDeps.map(d => (depMap[d] !== undefined ? depMap[d] : 0)));
+        }
     });
 
-    const visited = new Set();
+    const maxLevel = Math.max(0, ...Object.values(depMap));
     const levels = [];
-    let current = new Set(['START']);
-    while (current.size > 0) {
-        const next = new Set();
-        const level = [];
-        current.forEach(s => {
-            if (visited.has(s)) return;
-            visited.add(s);
-            if (s !== 'START' && s !== 'END') level.push(s);
-            const edgesFrom = outgoing[s] || [];
-            edgesFrom.forEach(e => {
-                if (e.type === 'fanout') {
-                    (e.targets || []).forEach(t => {
-                        const tn = t === '__end__' ? 'END' : t;
-                        if (!visited.has(tn)) next.add(tn);
-                    });
-                } else if (e.type === 'conditional') {
-                    Object.values(e.targets || {}).forEach(t => {
-                        const tn = t === '__end__' ? 'END' : t;
-                        if (!visited.has(tn)) next.add(tn);
-                    });
-                } else {
-                    const tn = (e.target === '__end__' ? 'END' : e.target);
-                    if (!visited.has(tn)) next.add(tn);
-                }
-            });
-        });
-        if (level.length > 0) levels.push(level);
-        current = next;
+    for (let i = 0; i <= maxLevel; i++) {
+        levels.push(Object.keys(depMap).filter(k => depMap[k] === i));
     }
 
     let html = '';
@@ -1240,13 +1225,6 @@ function renderFlowLevel(nodes, edges, entry, nodeColors, annotations) {
                 html += renderGraphNode(n, nodeColors[n] || '#3b82f6', n, annotations[n] || null);
             });
             html += '</div>';
-            const edge = outgoing[level[0]] || [];
-            if (edge.find(e => e.type === 'fanout')) {
-                html += '<div style="font-size:11px;color:#64748b;margin-top:2px;">[FanOut 并行]</div>';
-            }
-            if (edge.find(e => e.type === 'conditional')) {
-                html += '<div style="font-size:11px;color:#64748b;margin-top:2px;">[条件路由]</div>';
-            }
         }
     });
     return html;
@@ -1555,6 +1533,17 @@ async function agentFetchAndShow(isFirst) {
         } else {
             // 移除加载指示器和旧按钮
             document.querySelectorAll('#batch-loading, #agent-results .btn, #agent-results span').forEach(el => el.remove());
+            // 追加新结果行
+            const tbody = document.querySelector('#agent-results-table tbody');
+            if (tbody) {
+                (data.results || []).forEach(r => {
+                    let row = document.createElement('tr');
+                    row.innerHTML = '<td style="padding:8px;font-weight:bold;">' + escapeHtml(r.task_name) + '</td>'
+                        + '<td style="padding:8px;font-size:13px;">' + escapeHtml(r.output) + '</td>'
+                        + '<td style="padding:4px;font-size:11px;color:#94a3b8;text-align:right;">' + (r.duration_ms||0) + 'ms | ' + (r.tokens||0) + 't</td>';
+                    tbody.appendChild(row);
+                });
+            }
             // 追加新按钮
             let footer = document.createElement('div');
             footer.style.cssText = 'padding:10px;text-align:center;';
