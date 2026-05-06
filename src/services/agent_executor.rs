@@ -116,38 +116,27 @@ impl AgentEngine {
         Ok((results, has_more))
     }
 
-    /// ── 执行一批任务（并行） ──
+    /// ── 执行一批任务（逐个执行，不用 spawn） ──
     async fn run_batch(config: &Config, task: &str, batch: &[AgentTask]) -> Result<Vec<AgentExecResult>, GraphDemoError> {
-        let llm = std::sync::Arc::new(OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(512)));
-
-        let mut handles = Vec::new();
-        for at in batch {
-            let llm = llm.clone();
-            let desc = at.description.clone();
-            let name = at.name.clone();
-            let t = task.to_string();
-            handles.push(tokio::spawn(async move {
-                let start = Instant::now();
-                let p = format!("任务：{}\n子任务：{}\n\n输出结果。", t, desc);
-                let resp = tokio::time::timeout(Duration::from_secs(30), llm.invoke(vec![Message::human(&p)], None)).await;
-                match resp {
-                    Ok(Ok(r)) => AgentExecResult {
-                        task_name: name, tool: String::new(), input_summary: String::new(),
-                        output: r.content.chars().take(200).collect(),
-                        duration_ms: start.elapsed().as_millis() as u64,
-                        tokens: r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0),
-                    },
-                    _ => AgentExecResult {
-                        task_name: name, tool: String::new(), input_summary: String::new(),
-                        output: "执行失败".into(), duration_ms: 0, tokens: 0,
-                    },
-                }
-            }));
-        }
+        let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(512));
 
         let mut results = Vec::new();
-        for h in handles {
-            if let Ok(r) = h.await { results.push(r); }
+        for at in batch {
+            let start = Instant::now();
+            let p = format!("任务：{}\n子任务：{}\n\n输出结果。", task, at.description);
+            let resp = tokio::time::timeout(Duration::from_secs(30), llm.invoke(vec![Message::human(&p)], None)).await;
+            match resp {
+                Ok(Ok(r)) => results.push(AgentExecResult {
+                    task_name: at.name.clone(), tool: String::new(), input_summary: String::new(),
+                    output: r.content.chars().take(200).collect(),
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    tokens: r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0),
+                }),
+                _ => results.push(AgentExecResult {
+                    task_name: at.name.clone(), tool: String::new(), input_summary: String::new(),
+                    output: "执行失败".into(), duration_ms: 0, tokens: 0,
+                }),
+            }
         }
         Ok(results)
     }
