@@ -1,0 +1,1 @@
+{"task":"hi","agent_tasks":[{"name":"回答","description":"回答","tool":"llm_query","depends_on":[],"input_template":"无"}]}
