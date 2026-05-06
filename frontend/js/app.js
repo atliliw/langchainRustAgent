@@ -1480,21 +1480,24 @@ async function agentStepExecute() {
 }
 
 async function agentNextBatch() {
-    document.querySelectorAll('#agent-results button').forEach(b => b.remove());
+    document.querySelectorAll('#agent-results-table .btn, #agent-results-table span').forEach(b => b.remove());
     const el = document.createElement('div');
     el.id = 'batch-loading';
     el.style.cssText = 'text-align:center;padding:20px;color:#8b5cf6;';
     el.textContent = '⏳ 执行中...';
-    document.getElementById('agent-results').appendChild(el);
+    document.getElementById('agent-results-table').appendChild(el);
     await agentFetchAndShow(false);
 }
 
 async function agentFetchAndShow(isFirst) {
     const resDiv = document.getElementById('agent-results');
     if (isFirst) {
-        resDiv.innerHTML = '<div style="text-align:center;padding:30px;color:#8b5cf6;">⏳ 执行中...</div>';
+        // 保留上方规划表格，下方追加结果区域
+        let execDiv = document.createElement('div');
+        execDiv.id = 'agent-exec-area';
+        execDiv.innerHTML = '<div style="text-align:center;padding:30px;color:#8b5cf6;">⏳ 执行中...</div>';
+        resDiv.appendChild(execDiv);
     }
-    // 非第一步不重置内容，保留已有结果
 
     try {
         const url = isFirst ? '/api/agent/execute' : '/api/agent/next';
@@ -1514,6 +1517,7 @@ async function agentFetchAndShow(isFirst) {
         document.getElementById('agent-container').innerHTML = renderGraphHtml(_agentPlanData.graph_structure, annotations);
 
         let html = '<div id="agent-results-table" style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;margin-top:10px;">';
+        html += '<h4 style="margin:0 0 10px 0;color:#7c3aed;">执行结果</h4>';
         html += '<table style="width:100%"><thead><tr style="background:#f5f3ff;"><th>任务</th><th>输出</th><th style="width:100px;">消耗</th></tr></thead><tbody>';
         _agentAllResults.forEach(r => {
             html += '<tr><td style="padding:8px;font-weight:bold;">' + escapeHtml(r.task_name) + '</td>';
@@ -1531,9 +1535,7 @@ async function agentFetchAndShow(isFirst) {
                 + '</div></div>';
             resDiv.innerHTML = html;
         } else {
-            // 移除加载指示器和旧按钮
-            document.querySelectorAll('#batch-loading, #agent-results .btn, #agent-results span').forEach(el => el.remove());
-            // 追加新结果行
+            document.querySelectorAll('#batch-loading').forEach(el => el.remove());
             const tbody = document.querySelector('#agent-results-table tbody');
             if (tbody) {
                 (data.results || []).forEach(r => {
@@ -1544,7 +1546,6 @@ async function agentFetchAndShow(isFirst) {
                     tbody.appendChild(row);
                 });
             }
-            // 追加新按钮
             let footer = document.createElement('div');
             footer.style.cssText = 'padding:10px;text-align:center;';
             if (data.has_next) {
@@ -1552,7 +1553,7 @@ async function agentFetchAndShow(isFirst) {
             } else {
                 footer.innerHTML = '<span style="color:#10b981;font-weight:bold;">✅ 全部完成</span>';
             }
-            document.getElementById('agent-results-table').appendChild(footer);
+            document.querySelector('#agent-results-table').appendChild(footer);
         }
     } catch (e) {
         resDiv.innerHTML = '<div style="color:#e94560;padding:20px;">❌ ' + escapeHtml(e.message) + '</div>';
