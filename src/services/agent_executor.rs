@@ -141,13 +141,33 @@ impl AgentEngine {
     }
 
     pub async fn execute_all_batches(config: &Config, task: String, agent_tasks: Vec<AgentTask>) -> Result<AgentExecResponse, GraphDemoError> {
-        let (sid, mut all, _) = Self::execute_batch_start(config, task, agent_tasks).await?;
-        loop {
-            let (batch, has_more) = Self::execute_batch_next(config, &sid).await?;
-            all.extend(batch);
-            if !has_more { break; }
-        }
-        Self::batch_finalize(&sid).await
+        let total_start = Instant::now();
+        // 一次性调 LLM 执行所有子任务，避免 N 次串行调用
+        let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
+        let task_list: String = agent_tasks.iter()
+            .map(|t| format!("- {}：{}", t.name, t.description))
+            .collect::<Vec<_>>().join("\n");
+        let prompt = format!(
+            "依次执行以下子任务，为每个输出结果。\n\n原始任务：{task}\n\n子任务：\n{task_list}\n\n返回JSON数组：\n[{{\"name\":\"子任务名\",\"output\":\"结果\"}}]\n只返回JSON。",
+            task = task, task_list = task_list,
+        );
+        let resp = llm.invoke(vec![Message::human(&prompt)], None).await
+            .map_err(|e| GraphDemoError::ExecutionError(format!("执行失败: {}", e)))?;
+        let cleaned = resp.content.trim_start_matches("```json").trim_start_matches("```")
+            .trim_end_matches("```").trim();
+        #[derive(serde::Deserialize)] struct TaskOut { name: String, output: String }
+        let outputs: Vec<TaskOut> = serde_json::from_str(cleaned).unwrap_or_default();
+        let total_tok = resp.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
+        let per_tok = total_tok / std::cmp::max(1, agent_tasks.len());
+        let per_ms = total_start.elapsed().as_millis() as u64 / std::cmp::max(1, agent_tasks.len() as u64);
+
+        let results: Vec<AgentExecResult> = agent_tasks.iter().enumerate().map(|(i, at)| {
+            let out = outputs.get(i).map(|o| o.output.clone()).unwrap_or_default();
+            AgentExecResult { task_name: at.name.clone(), tool: at.tool.clone(), input_summary: at.input_template.clone(), output: out, duration_ms: per_ms, tokens: per_tok }
+        }).collect();
+
+        let fa = results.last().map(|r| r.output.clone()).unwrap_or_default();
+        Ok(AgentExecResponse{results, final_answer: fa, total_duration_ms: total_start.elapsed().as_millis() as u64, total_tokens: total_tok})
     }
 
     /// ── 完成验证 ──
