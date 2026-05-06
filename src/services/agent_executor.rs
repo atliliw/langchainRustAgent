@@ -101,18 +101,17 @@ impl AgentEngine {
         if batch.is_empty() { return Err(GraphDemoError::BuildError("没有更多可执行任务".into())); }
 
         let results = Self::run_batch(config, &task, &batch).await?;
-        let mut g = store().lock().unwrap();
-        if let Some(s) = g.as_mut().unwrap().get_mut(sid) {
-            for r in &results {
-                s.done.push(r.clone());
-                s.completed_names.insert(r.task_name.clone());
+        let has_more;
+        {
+            let mut g = store().lock().unwrap();
+            if let Some(s) = g.as_mut().unwrap().get_mut(sid) {
+                for r in &results {
+                    s.done.push(r.clone());
+                    s.completed_names.insert(r.task_name.clone());
+                }
             }
+            has_more = g.as_ref().unwrap().get(sid).map(|s| s.completed_names.len() < s.all.len()).unwrap_or(false);
         }
-
-        let has_more = {
-            let g = store().lock().unwrap();
-            g.as_ref().unwrap().get(sid).map(|s| s.completed_names.len() < s.all.len()).unwrap_or(false)
-        };
         Ok((results, has_more))
     }
 
@@ -139,6 +138,16 @@ impl AgentEngine {
             }
         }
         Ok(results)
+    }
+
+    pub async fn execute_all_batches(config: &Config, task: String, agent_tasks: Vec<AgentTask>) -> Result<AgentExecResponse, GraphDemoError> {
+        let (sid, mut all, _) = Self::execute_batch_start(config, task, agent_tasks).await?;
+        loop {
+            let (batch, has_more) = Self::execute_batch_next(config, &sid).await?;
+            all.extend(batch);
+            if !has_more { break; }
+        }
+        Self::batch_finalize(&sid).await
     }
 
     /// ── 完成验证 ──

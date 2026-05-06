@@ -101,21 +101,17 @@ pub async fn agent_plan(
     Ok(Json(result))
 }
 
-/// Agent 开始执行（第一批）
-/// POST /api/agent/execute
 pub async fn agent_execute(
     State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+) -> Result<Json<AgentExecResponse>, ApiErrorResponse> {
     let task = request["task"].as_str().unwrap_or("").to_string();
     let tasks: Vec<AgentTask> = serde_json::from_value(request["agent_tasks"].clone())
         .unwrap_or_default();
-    let (sid, results, has_next) = state.api.agent_batch_start(task, tasks).await?;
-    Ok(Json(serde_json::json!({"session_id":sid,"results":results,"has_next":has_next})))
+    let result = state.api.agent_execute_all(task, tasks).await?;
+    Ok(Json(result))
 }
 
-/// Agent 下一批
-/// POST /api/agent/next
 pub async fn agent_next(
     State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
@@ -123,15 +119,4 @@ pub async fn agent_next(
     let sid = request["session_id"].as_str().unwrap_or("");
     let (results, has_next) = state.api.agent_batch_next(sid).await?;
     Ok(Json(serde_json::json!({"results":results,"has_next":has_next})))
-}
-
-/// Agent 完成验证
-/// POST /api/agent/finalize
-pub async fn agent_finalize(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<serde_json::Value>,
-) -> Result<Json<AgentExecResponse>, ApiErrorResponse> {
-    let sid = request["session_id"].as_str().unwrap_or("");
-    let result = state.api.agent_batch_finalize(sid).await?;
-    Ok(Json(result))
 }

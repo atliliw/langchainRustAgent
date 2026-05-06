@@ -431,14 +431,12 @@ impl ApiService {
         crate::services::agent_executor::AgentEngine::execute_batch_start(&self.config, task, agent_tasks).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
-
     pub async fn agent_batch_next(&self, sid: &str) -> Result<(Vec<AgentExecResult>, bool), ApiError> {
         crate::services::agent_executor::AgentEngine::execute_batch_next(&self.config, sid).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
-
-    pub async fn agent_batch_finalize(&self, sid: &str) -> Result<AgentExecResponse, ApiError> {
-        crate::services::agent_executor::AgentEngine::batch_finalize(sid).await
+    pub async fn agent_execute_all(&self, task: String, agent_tasks: Vec<AgentTask>) -> Result<AgentExecResponse, ApiError> {
+        crate::services::agent_executor::AgentEngine::execute_all_batches(&self.config, task, agent_tasks).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
     
