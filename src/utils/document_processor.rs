@@ -7,6 +7,7 @@
 use crate::config::Config;
 use crate::errors::ProcessError;
 use crate::models::ChunkStrategy;
+use crate::utils::chunkers::TokenTextSplitter;
 use langchainrust::{
     Document, TextSplitter, RecursiveCharacterSplitter,
     PDFLoader, TextLoader, JSONLoader, MarkdownLoader, CSVLoader,
@@ -67,27 +68,61 @@ impl DocumentProcessor {
     
     /// 按策略创建分割器并分块
     fn split_documents_with_strategy(&self, documents: &[Document], strategy: &ChunkStrategy) -> Result<Vec<Document>, ProcessError> {
-        let splitter = match strategy {
-            ChunkStrategy::Recursive => RecursiveCharacterSplitter::new(500, 50),
-            ChunkStrategy::Large => RecursiveCharacterSplitter::new(1000, 100),
-            ChunkStrategy::Small => RecursiveCharacterSplitter::new(200, 30),
-            ChunkStrategy::Paragraph => {
-                RecursiveCharacterSplitter::new(1500, 0)
-                    .with_separators(vec!["\n\n".to_string()])
+        match strategy {
+            ChunkStrategy::Token => {
+                // Token 模式：512 tokens/chunk, 50 tokens overlap
+                let splitter = TokenTextSplitter::new(512, 50);
+                let all_chunks: Vec<Document> = documents.iter()
+                    .flat_map(|doc| {
+                        let chunks = splitter.split_document(doc);
+                        chunks.into_iter().map(|chunk| {
+                            chunk.with_metadata("source_file", doc.metadata.get("source")
+                                .unwrap_or(&"".to_string()).clone())
+                        })
+                    })
+                    .collect();
+                Ok(all_chunks)
             }
-        };
-        
-        let all_chunks: Vec<Document> = documents.iter()
-            .flat_map(|doc| {
-                let chunks = splitter.split_document(doc);
-                chunks.into_iter().map(|chunk| {
-                    chunk.with_metadata("source_file", doc.metadata.get("source")
-                        .unwrap_or(&"".to_string()).clone())
-                })
-            })
-            .collect();
-        
-        Ok(all_chunks)
+            ChunkStrategy::Semantic => {
+                // Semantic 模式暂不可用（需要 Embedding API 支持）
+                // 降级为 Recursive
+                tracing::warn!("Semantic chunking requires Embedding API, falling back to Recursive");
+                let splitter = RecursiveCharacterSplitter::new(500, 50);
+                let all_chunks: Vec<Document> = documents.iter()
+                    .flat_map(|doc| {
+                        let chunks = splitter.split_document(doc);
+                        chunks.into_iter().map(|chunk| {
+                            chunk.with_metadata("source_file", doc.metadata.get("source")
+                                .unwrap_or(&"".to_string()).clone())
+                        })
+                    })
+                    .collect();
+                Ok(all_chunks)
+            }
+            _ => {
+                let splitter = match strategy {
+                    ChunkStrategy::Recursive => RecursiveCharacterSplitter::new(500, 50),
+                    ChunkStrategy::Large => RecursiveCharacterSplitter::new(1000, 100),
+                    ChunkStrategy::Small => RecursiveCharacterSplitter::new(200, 30),
+                    ChunkStrategy::Paragraph => {
+                        RecursiveCharacterSplitter::new(1500, 0)
+                            .with_separators(vec!["\n\n".to_string()])
+                    }
+                    _ => RecursiveCharacterSplitter::new(500, 50),
+                };
+                
+                let all_chunks: Vec<Document> = documents.iter()
+                    .flat_map(|doc| {
+                        let chunks = splitter.split_document(doc);
+                        chunks.into_iter().map(|chunk| {
+                            chunk.with_metadata("source_file", doc.metadata.get("source")
+                                .unwrap_or(&"".to_string()).clone())
+                        })
+                    })
+                    .collect();
+                Ok(all_chunks)
+            }
+        }
     }
     
     pub fn is_supported(&self, extension: &str) -> bool {

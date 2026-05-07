@@ -113,6 +113,8 @@ const CHUNK_STRATEGY_DESC = {
     large: 'chunk_size=1000，适合需要长上下文理解的文档',
     small: 'chunk_size=200，适合精准检索场景',
     paragraph: '按段落分割（\\n\\n），保留完整段落结构',
+    token: '按512 tokens切分，精确控制上下文窗口，主流RAG标准',
+    semantic: '用Embedding检测话题边界切分（暂降级为Recursive）',
 };
 
 function updateChunkStrategyDesc() {

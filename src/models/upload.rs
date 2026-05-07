@@ -11,6 +11,10 @@ pub enum ChunkStrategy {
     Small,
     /// 段落：按段落分割，保留完整段落，chunk_size=1500, overlap=0
     Paragraph,
+    /// Token 分割：按 token 数切分，精确控制上下文窗口
+    Token,
+    /// 语义分割：用 Embedding 检测话题边界，按语义切分
+    Semantic,
 }
 
 impl Default for ChunkStrategy {
@@ -26,6 +30,8 @@ impl ChunkStrategy {
             ChunkStrategy::Large => "large",
             ChunkStrategy::Small => "small",
             ChunkStrategy::Paragraph => "paragraph",
+            ChunkStrategy::Token => "token",
+            ChunkStrategy::Semantic => "semantic",
         }
     }
 
@@ -34,6 +40,8 @@ impl ChunkStrategy {
             "large" => Self::Large,
             "small" => Self::Small,
             "paragraph" => Self::Paragraph,
+            "token" => Self::Token,
+            "semantic" => Self::Semantic,
             _ => Self::Recursive,
         }
     }
