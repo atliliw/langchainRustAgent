@@ -1,11 +1,12 @@
 //! 文档处理模块 — 文件加载和文本分割
 //!
 //! 支持 5 种文件格式：txt, pdf, md, json, csv
-//! 分块策略：RecursiveCharacterSplitter(chunk_size=500, chunk_overlap=50)
+//! 分块策略：支持 Recursive / Large / Small / Paragraph
 //! 分块后同时存入 Qdrant 向量库 + MongoDB BM25 索引
 
 use crate::config::Config;
 use crate::errors::ProcessError;
+use crate::models::ChunkStrategy;
 use langchainrust::{
     Document, TextSplitter, RecursiveCharacterSplitter,
     PDFLoader, TextLoader, JSONLoader, MarkdownLoader, CSVLoader,
@@ -25,6 +26,13 @@ impl DocumentProcessor {
     
     /// 处理文件：加载 + 分块 + 返回 (原始文档, 分块文档)
     pub async fn process_file(&self, path: &Path) -> Result<(Vec<Document>, Vec<Document>), ProcessError> {
+        self.process_file_with_strategy(path, &ChunkStrategy::default()).await
+    }
+    
+    /// 按策略处理文件
+    pub async fn process_file_with_strategy(
+        &self, path: &Path, strategy: &ChunkStrategy,
+    ) -> Result<(Vec<Document>, Vec<Document>), ProcessError> {
         if !path.exists() {
             return Err(ProcessError::FileNotFound(path.display().to_string()));
         }
@@ -34,15 +42,12 @@ impl DocumentProcessor {
             .unwrap_or("")
             .to_lowercase();
         
-        // 检查文件类型是否支持
         if !self.config.document.supported_types.contains(&extension) {
             return Err(ProcessError::UnsupportedType(extension));
         }
         
-        // 按类型选择加载器
         let original_docs = self.load_file(path, &extension).await?;
-        // 用 RecursiveCharacterSplitter 分块
-        let chunks = self.split_documents(&original_docs)?;
+        let chunks = self.split_documents_with_strategy(&original_docs, strategy)?;
         
         Ok((original_docs, chunks))
     }
@@ -60,13 +65,17 @@ impl DocumentProcessor {
         Ok(documents)
     }
     
-    /// 用 RecursiveCharacterSplitter 进行分块
-    /// chunk_size=500, chunk_overlap=50
-    fn split_documents(&self, documents: &[Document]) -> Result<Vec<Document>, ProcessError> {
-        let splitter = RecursiveCharacterSplitter::new(
-            self.config.document.chunk_size,    // 每块 500 字符
-            self.config.document.chunk_overlap, // 块间重叠 50 字符
-        );
+    /// 按策略创建分割器并分块
+    fn split_documents_with_strategy(&self, documents: &[Document], strategy: &ChunkStrategy) -> Result<Vec<Document>, ProcessError> {
+        let splitter = match strategy {
+            ChunkStrategy::Recursive => RecursiveCharacterSplitter::new(500, 50),
+            ChunkStrategy::Large => RecursiveCharacterSplitter::new(1000, 100),
+            ChunkStrategy::Small => RecursiveCharacterSplitter::new(200, 30),
+            ChunkStrategy::Paragraph => {
+                RecursiveCharacterSplitter::new(1500, 0)
+                    .with_separators(vec!["\n\n".to_string()])
+            }
+        };
         
         let all_chunks: Vec<Document> = documents.iter()
             .flat_map(|doc| {

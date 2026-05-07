@@ -38,6 +38,18 @@
         <div id="upload-tab" class="card">
             <h2>上传文档</h2>
             <p style="color: #666; margin-bottom: 15px;">支持文件类型：TXT, PDF, MD, JSON, CSV</p>
+            <div style="margin-bottom: 15px; display: flex; gap: 20px; align-items: center; flex-wrap: wrap;">
+                <label style="font-size: 13px; color: #475569;">
+                    切分策略：
+                    <select id="chunk-strategy" style="padding: 6px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; margin-left: 6px;">
+                        <option value="recursive">递归分割（默认·500字符）</option>
+                        <option value="large">大块分割（1000字符）</option>
+                        <option value="small">小块分割（200字符）</option>
+                        <option value="paragraph">段落分割（完整段落）</option>
+                    </select>
+                </label>
+                <span style="font-size: 12px; color: #94a3b8;" id="chunk-strategy-desc">按段落→行→句→字符递归切分，chunk_size=500</span>
+            </div>
             <div class="upload-area" id="upload-area">
                 <p>点击或拖拽文件到此处上传</p>
                 <input type="file" id="file-input" style="display: none" accept=".txt,.pdf,.md,.json,.csv">

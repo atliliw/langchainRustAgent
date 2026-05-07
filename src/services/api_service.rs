@@ -71,10 +71,15 @@ impl ApiService {
     
     /// ──────────────────── 文档上传 ────────────────────
     
-    /// 上传并处理文件
-    /// 流程：加载 → 分块 → Qdrant(向量) + MongoDB(BM25)
+    /// 上传并处理文件（默认策略）
     pub async fn upload_file(&self, file_path: &Path, original_name: &str) -> Result<UploadResponse, ApiError> {
-        let (original_docs, chunks) = self.processor.process_file(file_path).await?;
+        self.upload_file_with_strategy(file_path, original_name, ChunkStrategy::default()).await
+    }
+
+    /// 上传并处理文件（指定切分策略）
+    /// 流程：加载 → 分块 → Qdrant(向量) + MongoDB(BM25)
+    pub async fn upload_file_with_strategy(&self, file_path: &Path, original_name: &str, strategy: ChunkStrategy) -> Result<UploadResponse, ApiError> {
+        let (original_docs, chunks) = self.processor.process_file_with_strategy(file_path, &strategy).await?;
         //   ↑ 原始文档          ↑ 分块后的chunks
         
         let doc_count = original_docs.len();
@@ -112,8 +117,9 @@ impl ApiService {
             success: true,
             document_count: doc_count,
             chunk_count: vector_ids.len(),
-            message: format!("成功上传 {} 个原始文档，分割为 {} 个chunks（向量+BM25 MongoDB 已持久化）", doc_count, vector_ids.len()),
+            message: format!("成功上传 {} 个原始文档，分割为 {} 个chunks（{}，向量+BM25已持久化）", doc_count, vector_ids.len(), strategy.as_str()),
             document_ids: vector_ids,
+            chunk_strategy: strategy.as_str().to_string(),
         })
     }
     

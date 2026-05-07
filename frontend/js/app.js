@@ -108,6 +108,18 @@ async function deleteDocument(parentId, filename) {
     } catch (e) { alert('删除失败: ' + e.message); }
 }
 
+const CHUNK_STRATEGY_DESC = {
+    recursive: '按段落→行→句→字符递归切分，chunk_size=500，适合大多数场景',
+    large: 'chunk_size=1000，适合需要长上下文理解的文档',
+    small: 'chunk_size=200，适合精准检索场景',
+    paragraph: '按段落分割（\\n\\n），保留完整段落结构',
+};
+
+function updateChunkStrategyDesc() {
+    const val = document.getElementById('chunk-strategy').value;
+    document.getElementById('chunk-strategy-desc').textContent = CHUNK_STRATEGY_DESC[val] || '';
+}
+
 async function uploadFile(file) {
     const allowed = ['.txt', '.pdf', '.md', '.json', '.csv'];
     const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
@@ -116,6 +128,7 @@ async function uploadFile(file) {
     document.getElementById('upload-progress').classList.remove('hidden');
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('chunk_strategy', document.getElementById('chunk-strategy').value);
     try {
         const res = await fetch(`${API_BASE}/upload`, { method: 'POST', body: formData });
         const data = await res.json();
@@ -131,6 +144,7 @@ async function uploadMultipleFiles(files) {
     let successCount = 0;
     let failCount = 0;
     let totalChunks = 0;
+    const strategy = document.getElementById('chunk-strategy').value;
     
     showResult('upload-result', 'loading', `正在批量上传 ${files.length} 个文件...`);
     document.getElementById('upload-progress').classList.remove('hidden');
@@ -142,6 +156,7 @@ async function uploadMultipleFiles(files) {
         
         const formData = new FormData();
         formData.append('file', file);
+        formData.append('chunk_strategy', strategy);
         
         try {
             const res = await fetch(`${API_BASE}/upload`, { method: 'POST', body: formData });
@@ -1600,6 +1615,8 @@ document.addEventListener('DOMContentLoaded', function() {
     setupSearchModeHandlers();
     document.getElementById('compress-mode').addEventListener('change', updateCompressHint);
     updateCompressHint();
+    document.getElementById('chunk-strategy').addEventListener('change', updateChunkStrategyDesc);
+    updateChunkStrategyDesc();
     
     document.getElementById('bm25-query').addEventListener('keypress', (e) => { if (e.key === 'Enter') bm25Search(); });
     document.getElementById('vector-query').addEventListener('keypress', (e) => { if (e.key === 'Enter') vectorSearch(); });
