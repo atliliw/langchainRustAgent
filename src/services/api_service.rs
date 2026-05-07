@@ -428,7 +428,7 @@ impl ApiService {
         if use_rag {
             plan.tasks.insert(0, AgentTask {
                 name: "知识库检索".into(), description: "搜索知识库中与任务相关的文档".into(),
-                tool: "knowledge_search".into(), depends_on: vec![], input_template: String::new(),
+                tool: "llm_query".into(), depends_on: vec![], input_template: String::new(),
             });
             // 原有无依赖任务改为依赖知识库检索
             for t in &mut plan.tasks[1..] {
@@ -446,15 +446,13 @@ impl ApiService {
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
     pub async fn agent_batch_start_rag(&self, task: String, agent_tasks: Vec<AgentTask>) -> Result<(String, Vec<AgentExecResult>, bool), ApiError> {
-        // 检索知识库，结果作为额外上下文
+        // 真正搜索 Qdrant 知识库
         let search_res = self.search_vector(crate::models::SearchRequest { query: task.clone(), top_k: 3 }).await?;
         let rag_ctx: String = search_res.results.iter().map(|r| r.content.clone()).collect::<Vec<_>>().join("\n---\n");
-        // 用修改后的描述替换第一批任务，带上知识库内容
+        // 把搜索结果注入到"知识库检索"任务的描述
         let mut tasks = agent_tasks;
-        for t in &mut tasks {
-            if t.depends_on.is_empty() && !rag_ctx.is_empty() {
-                t.description = format!("{}\n\n知识库参考信息：\n{}", t.description, rag_ctx);
-            }
+        if let Some(ks) = tasks.iter_mut().find(|t| t.name == "知识库检索") {
+            ks.description = format!("搜索知识库，找到以下相关内容：\n{}", if rag_ctx.is_empty() { "无匹配文档" } else { &rag_ctx });
         }
         crate::services::agent_executor::AgentEngine::execute_batch_start(&self.config, task, tasks).await
             .map_err(|e| ApiError::SearchError(e.to_string()))

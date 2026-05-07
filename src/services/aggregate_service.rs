@@ -17,7 +17,7 @@ use crate::models::{
     AggregateStatsResponse, AggregateListResponse,
 };
 use crate::agents::{GitHubTool, HackerNewsTool, RSSTool, ArXivTool, CollectedItem};
-use crate::stores::ContentStore;
+use crate::stores::{ContentStore, ConversationStore};
 use langchainrust::{
     language_models::OpenAIChat,
     schema::Message,
@@ -31,11 +31,17 @@ use std::sync::Arc;
 pub struct AggregateService {
     content_store: Arc<ContentStore>,  // 采集内容的存储
     llm: Arc<OpenAIChat>,               // 用于生成摘要的 LLM
+    stats_store: Option<ConversationStore>, // 统计记录（可选）
 }
 
 impl AggregateService {
     /// 初始化：连接 SQLite + 初始化摘要用的 LLM
     pub async fn new(config: Config) -> Result<Self, AgentError> {
+        Self::new_with_stats(config, None).await
+    }
+
+    /// 初始化（带统计记录）
+    pub async fn new_with_stats(config: Config, stats_store: Option<ConversationStore>) -> Result<Self, AgentError> {
         let content_store = Arc::new(ContentStore::new(&config).await?);
         
         // 摘要用的 LLM 配置（温度低、token少、不流式）
@@ -53,6 +59,7 @@ impl AggregateService {
         Ok(Self {
             content_store,
             llm,
+            stats_store,
         })
     }
     
@@ -108,11 +115,17 @@ impl AggregateService {
             item.content.chars().take(800).collect::<String>()
         );
         
+        let start = std::time::Instant::now();
         let summary = self.llm.invoke(vec![Message::human(&prompt)], None).await
-            .map_err(|e| AgentError::LLMError(e.to_string()))?
-            .content;
+            .map_err(|e| AgentError::LLMError(e.to_string()))?;
+        let duration = start.elapsed().as_millis() as i64;
+        let tokens = crate::stores::estimate_tokens(&summary.content) as i64;
         
-        Ok(summary)
+        if let Some(ref store) = self.stats_store {
+            store.record_api_call("agent_summary", tokens, duration, true).await.ok();
+        }
+        
+        Ok(summary.content)
     }
     
     /// ──────────────────── 各渠道采集方法 ────────────────────

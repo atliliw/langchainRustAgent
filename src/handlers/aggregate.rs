@@ -24,7 +24,8 @@ pub async fn collect(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CollectRequest>,
 ) -> Result<AxumJson<CollectResponse>, ApiErrorResponse> {
-    let service = AggregateService::new(state.config.clone()).await
+    let store = Some((*state.api.conversation_store).clone());
+    let service = AggregateService::new_with_stats(state.config.clone(), store).await
         .map_err(|e: AgentError| ApiErrorResponse(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     
     let response = service.collect(request).await

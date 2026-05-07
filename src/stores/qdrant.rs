@@ -63,17 +63,20 @@ impl QdrantStore {
     /// 添加文档到向量库
     /// 流程：Embedding(批量) → 存入 Qdrant
     pub async fn add_documents(&self, documents: Vec<Document>) -> Result<Vec<String>, StoreError> {
-        // 提取所有文本
         let texts: Vec<&str> = documents.iter()
             .map(|d| d.content.as_str())
             .collect();
         
-        // 批量生成 Embedding（调用豆包 API）
-        let embeddings = self.embeddings.embed_documents(&texts).await
-            .map_err(|e| StoreError::EmbeddingError(e.to_string()))?;
+        // 分批生成 Embedding（API 限制每批最多 25 条）
+        const BATCH_SIZE: usize = 25;
+        let mut all_embeddings = Vec::new();
+        for chunk in texts.chunks(BATCH_SIZE) {
+            let embeds = self.embeddings.embed_documents(chunk).await
+                .map_err(|e| StoreError::EmbeddingError(e.to_string()))?;
+            all_embeddings.extend(embeds);
+        }
         
-        // 文档 + 向量 一起存入 Qdrant
-        self.store.add_documents(documents, embeddings).await
+        self.store.add_documents(documents, all_embeddings).await
             .map_err(|e| StoreError::AddError(e.to_string()))
     }
     

@@ -119,7 +119,6 @@ impl AgentEngine {
         Ok((results, has_more))
     }
 
-    /// ── 执行一批任务，传上下文 ──
     pub async fn run_batch(config: &Config, task: &str, batch: &[AgentTask], context: &[AgentExecResult]) -> Result<Vec<AgentExecResult>, GraphDemoError> {
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(512));
         let ctx: String = context.iter().map(|r| format!("【{}】\n{}", r.task_name, r.output)).collect::<Vec<_>>().join("\n\n");
@@ -155,7 +154,7 @@ impl AgentEngine {
                         Err(e) => (format!("天气查询失败: {}", e), 0),
                     }
                 }
-                "knowledge_search" | "llm_query" | "" => {
+                "llm_query" | "" => {
                     let p = format!("任务：{}\n当前子任务：{}\n\n前置完成的任务结果：\n{}\n\n请基于前置结果执行当前子任务并输出。", task, at.description, if ctx.is_empty() { "无" } else { &ctx });
                     let resp = tokio::time::timeout(Duration::from_secs(120), llm.invoke(vec![Message::human(&p)], None)).await;
                     match resp {
