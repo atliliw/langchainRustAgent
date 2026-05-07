@@ -281,6 +281,20 @@ impl ApiService {
         })
     }
     
+    /// 知识库搜索（Agent RAG 用）
+    /// 搜索知识库，返回格式化文本
+    async fn search_knowledge_base(&self, query: &str, top_k: usize) -> String {
+        let sources = match self.vector_store.search_rag(query, top_k).await {
+            Ok(results) => results,
+            Err(_) => return String::new(),
+        };
+        if sources.is_empty() { return String::new(); }
+        let formatted: Vec<String> = sources.iter().map(|r| {
+            format!("[相关性 {:.1}%]\n{}", r.score * 100.0, r.document.content)
+        }).collect();
+        formatted.join("\n\n---\n\n")
+    }
+
     /// ──────────────────── 对话 ────────────────────
     
     /// 执行一次对话
@@ -422,21 +436,36 @@ impl ApiService {
     
     /// ──────────────────── 真实 Agent 系统 ────────────────────
     
-    pub async fn agent_plan(&self, task: String) -> Result<AgentPlan, ApiError> {
-        crate::services::agent_executor::AgentEngine::plan(&self.config, task).await
+    pub async fn agent_plan(&self, task: String, use_rag: bool) -> Result<AgentPlan, ApiError> {
+        let rag_context = if use_rag {
+            self.search_knowledge_base(&task, 5).await
+        } else {
+            String::new()
+        };
+        crate::services::agent_executor::AgentEngine::plan(&self.config, task, rag_context, use_rag).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
     
-    pub async fn agent_batch_start(&self, task: String, agent_tasks: Vec<AgentTask>) -> Result<(String, Vec<AgentExecResult>, bool), ApiError> {
-        crate::services::agent_executor::AgentEngine::execute_batch_start(&self.config, task, agent_tasks).await
+    pub async fn agent_batch_start(&self, task: String, agent_tasks: Vec<AgentTask>, use_rag: bool) -> Result<(String, Vec<AgentExecResult>, bool), ApiError> {
+        let rag_context = if use_rag {
+            self.search_knowledge_base(&task, 5).await
+        } else {
+            String::new()
+        };
+        crate::services::agent_executor::AgentEngine::execute_batch_start(&self.config, task, agent_tasks, rag_context).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
     pub async fn agent_batch_next(&self, sid: &str) -> Result<(Vec<AgentExecResult>, bool), ApiError> {
         crate::services::agent_executor::AgentEngine::execute_batch_next(&self.config, sid).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
-    pub async fn agent_execute_all(&self, task: String, agent_tasks: Vec<AgentTask>) -> Result<AgentExecResponse, ApiError> {
-        crate::services::agent_executor::AgentEngine::execute_all_batches(&self.config, task, agent_tasks).await
+    pub async fn agent_execute_all(&self, task: String, agent_tasks: Vec<AgentTask>, use_rag: bool) -> Result<AgentExecResponse, ApiError> {
+        let rag_context = if use_rag {
+            self.search_knowledge_base(&task, 5).await
+        } else {
+            String::new()
+        };
+        crate::services::agent_executor::AgentEngine::execute_all_batches(&self.config, task, agent_tasks, rag_context).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
     

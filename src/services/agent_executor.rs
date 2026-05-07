@@ -5,12 +5,13 @@ use langchainrust::{language_models::OpenAIChat, schema::Message, core::runnable
 use std::collections::{HashSet, HashMap};
 use std::sync::Mutex;
 use std::time::Instant;
-use tokio::time::{timeout, Duration};
+use tokio::time::Duration;
 use uuid::Uuid;
 
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("llm_query","直接用 LLM 回答"),("web_search","搜索网络获取信息"),("weather","查询天气"),
     ("code_execute","执行代码"),("read_file","读取文件"),("summarize","总结"),
+    ("rag_search","检索知识库（RAG）获取与任务相关的文档内容"),
 ];
 
 // ── 状态存储 ──
@@ -20,6 +21,7 @@ struct BatchState {
     done: Vec<AgentExecResult>,
     completed_names: HashSet<String>,
     start: Instant,
+    rag_context: String,
 }
 static STORE: Mutex<Option<HashMap<String, BatchState>>> = Mutex::new(None);
 fn store() -> &'static Mutex<Option<HashMap<String, BatchState>>> { &STORE }
@@ -28,10 +30,22 @@ pub struct AgentEngine;
 
 impl AgentEngine {
     /// ── 规划 ──
-    pub async fn plan(config: &Config, task: String) -> Result<AgentPlan, GraphDemoError> {
+    pub async fn plan(config: &Config, task: String, rag_context: String, use_rag: bool) -> Result<AgentPlan, GraphDemoError> {
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
         let tj = AVAILABLE_TOOLS.iter().map(|(n,d)| format!("{{\"name\":\"{}\",\"description\":\"{}\"}}",n,d)).collect::<Vec<_>>().join(",");
-        let p = format!("将任务拆解为2-5个子任务并分配工具。可用工具：[{}] 返回JSON：[{{\"name\":\"子任务名（中文）\",\"description\":\"做什么\",\"tool\":\"工具名\",\"depends_on\":[\"前置\"],\"input_template\":\"需要什么\"}}] 任务：{} 只返回JSON。", tj, task);
+        let p = if use_rag {
+            let rag_context_block = if rag_context.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n知识库检索到以下相关信息：\n{}", rag_context)
+            };
+            format!(
+                "第一个子任务必须是「知识库检索」，使用 rag_search 工具。后续子任务基于知识库检索的结果执行。{rag}\n将任务拆解为2-5个子任务并分配工具。可用工具：[{tools}] 返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}] 任务：{task} 只返回JSON。name和description必须用中文。",
+                rag = rag_context_block, tools = tj, task = task
+            )
+        } else {
+            format!("将任务拆解为2-5个子任务并分配工具。可用工具：[{tools}] 返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}] 任务：{task} 只返回JSON。name和description必须用中文。", tools = tj, task = task)
+        };
         let r = llm.invoke(vec![Message::human(&p)], None).await.map_err(|e| GraphDemoError::ExecutionError(e.to_string()))?;
         let c = r.content.trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
         let tasks: Vec<AgentTask> = serde_json::from_str(c).map_err(|e| GraphDemoError::BuildError(format!("格式错: {}", e)))?;
@@ -66,13 +80,13 @@ impl AgentEngine {
     }
 
     /// ── 开始执行（返回第一批结果 + session_id） ──
-    pub async fn execute_batch_start(config: &Config, task: String, agent_tasks: Vec<AgentTask>) -> Result<(String, Vec<AgentExecResult>, bool), GraphDemoError> {
+    pub async fn execute_batch_start(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String) -> Result<(String, Vec<AgentExecResult>, bool), GraphDemoError> {
         let sid = Uuid::new_v4().to_string();
         let done: HashSet<String> = HashSet::new();
         let batch = Self::ready_batch(&agent_tasks, &done);
         if batch.is_empty() { return Err(GraphDemoError::BuildError("没有可执行的任务".into())); }
 
-        let results = Self::run_batch(config, &task, &batch, &[]).await?;
+        let results = Self::run_batch(config, &task, &batch, &[], &rag_context).await?;
         let completed_names: HashSet<String> = results.iter().map(|r| r.task_name.clone()).collect();
 
         let has_more = {
@@ -82,7 +96,7 @@ impl AgentEngine {
 
         let all = agent_tasks.clone();
         store().lock().unwrap().get_or_insert_with(HashMap::new).insert(sid.clone(), BatchState {
-            task, all, done: results.clone(), completed_names, start: Instant::now(),
+            task, all, done: results.clone(), completed_names, start: Instant::now(), rag_context,
         });
 
         Ok((sid, results, has_more))
@@ -90,11 +104,11 @@ impl AgentEngine {
 
     /// ── 下一批 ──
     pub async fn execute_batch_next(config: &Config, sid: &str) -> Result<(Vec<AgentExecResult>, bool), GraphDemoError> {
-        let (task, all, done_names) = {
+        let (task, all, done_names, rag_context) = {
             let g = store().lock().unwrap();
             let m = g.as_ref().unwrap();
             let s = m.get(sid).ok_or_else(|| GraphDemoError::BuildError("session不存在".into()))?;
-            (s.task.clone(), s.all.clone(), s.completed_names.clone())
+            (s.task.clone(), s.all.clone(), s.completed_names.clone(), s.rag_context.clone())
         };
 
         let batch = Self::ready_batch(&all, &done_names);
@@ -104,7 +118,7 @@ impl AgentEngine {
             let g = store().lock().unwrap();
             g.as_ref().unwrap().get(sid).map(|s| s.done.clone()).unwrap_or_default()
         };
-        let results = Self::run_batch(config, &task, &batch, &context).await?;
+        let results = Self::run_batch(config, &task, &batch, &context, &rag_context).await?;
         let has_more;
         {
             let mut g = store().lock().unwrap();
@@ -120,9 +134,10 @@ impl AgentEngine {
     }
 
     /// ── 执行一批任务，传上下文 ──
-    async fn run_batch(config: &Config, task: &str, batch: &[AgentTask], context: &[AgentExecResult]) -> Result<Vec<AgentExecResult>, GraphDemoError> {
+    async fn run_batch(config: &Config, task: &str, batch: &[AgentTask], context: &[AgentExecResult], rag_context: &str) -> Result<Vec<AgentExecResult>, GraphDemoError> {
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(512));
         let ctx: String = context.iter().map(|r| format!("【{}】\n{}", r.task_name, r.output)).collect::<Vec<_>>().join("\n\n");
+        let rag_section = if rag_context.is_empty() { String::new() } else { format!("\n\n知识库检索结果：\n{}", rag_context) };
 
         // 天气查询（用 wttr.in，免费无需 Key）
         async fn query_weather(city: &str) -> Result<String, String> {
@@ -137,8 +152,7 @@ impl AgentEngine {
 
             let (output, tokens) = match at.tool.as_str() {
                 "web_search" => {
-                    // 搜索降级到 LLM（搜索工具不稳定，直接让 LLM 回答）
-                    let p = format!("任务：{}\n当前子任务：{}\n\n请基于你的知识回答。", task, at.description);
+                    let p = format!("任务：{}\n当前子任务：{}\n\n请基于你的知识回答。{}", task, at.description, rag_section);
                     let resp = llm.invoke(vec![Message::human(&p)], None).await;
                     match resp {
                         Ok(r) => (r.content.clone(), r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0)),
@@ -155,8 +169,15 @@ impl AgentEngine {
                         Err(e) => (format!("天气查询失败: {}", e), 0),
                     }
                 }
+                "rag_search" => {
+                    if rag_context.is_empty() {
+                        ("知识库中未找到相关文档，请基于自身知识回答。".to_string(), 0)
+                    } else {
+                        (format!("知识库检索到以下相关信息：\n\n{}", rag_context), 0)
+                    }
+                }
                 "llm_query" | "" => {
-                    let p = format!("任务：{}\n当前子任务：{}\n\n前置完成的任务结果：\n{}\n\n请基于前置结果执行当前子任务并输出。", task, at.description, if ctx.is_empty() { "无" } else { &ctx });
+                    let p = format!("任务：{}\n当前子任务：{}\n\n前置完成的任务结果：\n{}\n\n请基于前置结果执行当前子任务并输出。{}", task, at.description, if ctx.is_empty() { "无" } else { &ctx }, rag_section);
                     let resp = tokio::time::timeout(Duration::from_secs(120), llm.invoke(vec![Message::human(&p)], None)).await;
                     match resp {
                         Ok(Ok(r)) => {
@@ -167,8 +188,7 @@ impl AgentEngine {
                     }
                 }
                 _ => {
-                    // 未知工具，退化为 LLM
-                    let p = format!("任务：{}\n子任务：{}\n(工具:{} 不可用，请直接用 LLM 执行)\n\n上下文：\n{}\n\n输出结果。", task, at.description, at.tool, if ctx.is_empty() { "无" } else { &ctx });
+                    let p = format!("任务：{}\n子任务：{}\n(工具:{} 不可用，请直接用 LLM 执行)\n\n上下文：\n{}\n\n输出结果。{}", task, at.description, at.tool, if ctx.is_empty() { "无" } else { &ctx }, rag_section);
                     let resp = llm.invoke(vec![Message::human(&p)], None).await;
                     match resp {
                         Ok(r) => {
@@ -188,16 +208,17 @@ impl AgentEngine {
         Ok(results)
     }
 
-    pub async fn execute_all_batches(config: &Config, task: String, agent_tasks: Vec<AgentTask>) -> Result<AgentExecResponse, GraphDemoError> {
+    pub async fn execute_all_batches(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String) -> Result<AgentExecResponse, GraphDemoError> {
         let total_start = Instant::now();
+        let rag_section = if rag_context.is_empty() { String::new() } else { format!("\n\n知识库检索结果：\n{}", rag_context) };
         // 一次性调 LLM 执行所有子任务，避免 N 次串行调用
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
         let task_list: String = agent_tasks.iter()
             .map(|t| format!("- {}：{}", t.name, t.description))
             .collect::<Vec<_>>().join("\n");
         let prompt = format!(
-            "依次执行以下子任务，为每个输出结果。\n\n原始任务：{task}\n\n子任务：\n{task_list}\n\n返回JSON数组：\n[{{\"name\":\"子任务名\",\"output\":\"结果\"}}]\n只返回JSON。",
-            task = task, task_list = task_list,
+            "依次执行以下子任务，为每个输出结果。\n\n原始任务：{task}\n\n子任务：\n{task_list}{rag}\n\n返回JSON数组：\n[{{\"name\":\"子任务名\",\"output\":\"结果\"}}]\n只返回JSON。",
+            task = task, task_list = task_list, rag = rag_section,
         );
         let resp = llm.invoke(vec![Message::human(&prompt)], None).await
             .map_err(|e| GraphDemoError::ExecutionError(format!("执行失败: {}", e)))?;
@@ -238,8 +259,8 @@ impl AgentEngine {
 
     /// ── 兼容旧接口（一次性跑完所有批次） ──
     pub async fn plan_and_execute(config: &Config, task: String) -> Result<AgentExecResponse, GraphDemoError> {
-        let plan = Self::plan(config, task.clone()).await?;
-        let (sid, mut all, _) = Self::execute_batch_start(config, task, plan.tasks).await?;
+        let plan = Self::plan(config, task.clone(), String::new(), false).await?;
+        let (sid, mut all, _) = Self::execute_batch_start(config, task, plan.tasks, String::new()).await?;
         loop {
             let (batch, has_more) = Self::execute_batch_next(config, &sid).await?;
             all.extend(batch);

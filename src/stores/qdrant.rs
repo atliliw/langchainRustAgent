@@ -95,6 +95,19 @@ impl QdrantStore {
         
         Ok(filtered)
     }
+
+    /// Agent RAG 专用搜索（更松的阈值，搜更多结果）
+    pub async fn search_rag(&self, query: &str, top_k: usize) -> Result<Vec<SearchResult>, StoreError> {
+        let query_embedding = self.embeddings.embed_query(query).await
+            .map_err(|e| StoreError::EmbeddingError(e.to_string()))?;
+        let results = self.store.similarity_search(&query_embedding, top_k).await
+            .map_err(|e| StoreError::SearchError(e.to_string()))?;
+        // Agent RAG 用 0.1 阈值，搜到更多结果
+        let filtered = results.into_iter()
+            .filter(|r| r.score >= 0.1)
+            .collect();
+        Ok(filtered)
+    }
     
     /// 获取文档总数
     pub async fn count(&self) -> usize {
