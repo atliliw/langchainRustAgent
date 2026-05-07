@@ -1,1 +1,0 @@
-{"task":"什么是RAG","agent_tasks":[{"name":"知识库检索","description":"搜索知识库，查询：什么是RAG","tool":"llm_query","depends_on":[],"input_template":"什么是RAG"},{"name":"理解RAG基本概念","description":"获取RAG（Retrieval-Augmented Generation）的定义、核心思想和典型流程","tool":"llm_query","depends_on":["知识库检索"],"input_template":"RAG definition"}],"use_rag":true}
