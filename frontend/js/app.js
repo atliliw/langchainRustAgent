@@ -1436,7 +1436,7 @@ async function runAgentPlan() {
     try {
         const res = await fetch(`${API_BASE}/agent/plan`, {
             method: 'POST', headers: {'Content-Type':'application/json'},
-            body: JSON.stringify({task})
+            body: JSON.stringify({task, use_rag: document.getElementById('agent-rag-toggle').checked})
         });
         if (!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.error||`${res.status}`); }
         const data = await res.json();
@@ -1502,7 +1502,7 @@ async function agentFetchAndShow(isFirst) {
     try {
         const url = isFirst ? '/api/agent/execute' : '/api/agent/next';
         const body = isFirst
-            ? JSON.stringify({task: _agentPlanData.original_task, agent_tasks: _agentPlanData.tasks})
+            ? JSON.stringify({task: _agentPlanData.original_task, agent_tasks: _agentPlanData.tasks, use_rag: document.getElementById('agent-rag-toggle').checked})
             : JSON.stringify({session_id: _agentSessionId});
 
         const res = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body});

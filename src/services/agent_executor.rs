@@ -40,7 +40,7 @@ impl AgentEngine {
         Ok(AgentPlan{original_task:task, tasks, graph_structure:gs})
     }
 
-    fn build_graph(tasks: &[AgentTask]) -> serde_json::Value {
+    pub fn build_graph(tasks: &[AgentTask]) -> serde_json::Value {
         let nodes: Vec<String> = tasks.iter().map(|t| t.name.clone()).collect();
         let mut edges = vec![];
         for i in 0..tasks.len() {
@@ -120,7 +120,7 @@ impl AgentEngine {
     }
 
     /// ── 执行一批任务，传上下文 ──
-    async fn run_batch(config: &Config, task: &str, batch: &[AgentTask], context: &[AgentExecResult]) -> Result<Vec<AgentExecResult>, GraphDemoError> {
+    pub async fn run_batch(config: &Config, task: &str, batch: &[AgentTask], context: &[AgentExecResult]) -> Result<Vec<AgentExecResult>, GraphDemoError> {
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(512));
         let ctx: String = context.iter().map(|r| format!("【{}】\n{}", r.task_name, r.output)).collect::<Vec<_>>().join("\n\n");
 
@@ -155,7 +155,7 @@ impl AgentEngine {
                         Err(e) => (format!("天气查询失败: {}", e), 0),
                     }
                 }
-                "llm_query" | "" => {
+                "knowledge_search" | "llm_query" | "" => {
                     let p = format!("任务：{}\n当前子任务：{}\n\n前置完成的任务结果：\n{}\n\n请基于前置结果执行当前子任务并输出。", task, at.description, if ctx.is_empty() { "无" } else { &ctx });
                     let resp = tokio::time::timeout(Duration::from_secs(120), llm.invoke(vec![Message::human(&p)], None)).await;
                     match resp {
@@ -167,7 +167,6 @@ impl AgentEngine {
                     }
                 }
                 _ => {
-                    // 未知工具，退化为 LLM
                     let p = format!("任务：{}\n子任务：{}\n(工具:{} 不可用，请直接用 LLM 执行)\n\n上下文：\n{}\n\n输出结果。", task, at.description, at.tool, if ctx.is_empty() { "无" } else { &ctx });
                     let resp = llm.invoke(vec![Message::human(&p)], None).await;
                     match resp {

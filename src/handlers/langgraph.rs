@@ -95,9 +95,11 @@ pub async fn execute_sub_tasks(
 /// POST /api/agent/plan
 pub async fn agent_plan(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<TaskDecomposeRequest>,
+    Json(request): Json<serde_json::Value>,
 ) -> Result<Json<AgentPlan>, ApiErrorResponse> {
-    let result = state.api.agent_plan(request.task).await?;
+    let task = request["task"].as_str().unwrap_or("").to_string();
+    let use_rag = request.get("use_rag").and_then(|v| v.as_bool()).unwrap_or(false);
+    let result = state.api.agent_plan(task, use_rag).await?;
     Ok(Json(result))
 }
 
@@ -108,7 +110,12 @@ pub async fn agent_execute(
     let task = request["task"].as_str().unwrap_or("").to_string();
     let tasks: Vec<AgentTask> = serde_json::from_value(request["agent_tasks"].clone())
         .unwrap_or_default();
-    let (sid, results, has_next) = state.api.agent_batch_start(task, tasks).await?;
+    let use_rag = request.get("use_rag").and_then(|v| v.as_bool()).unwrap_or(false);
+    let (sid, results, has_next) = if use_rag {
+        state.api.agent_batch_start_rag(task, tasks).await?
+    } else {
+        state.api.agent_batch_start(task, tasks).await?
+    };
     Ok(Json(serde_json::json!({"session_id":sid,"results":results,"has_next":has_next})))
 }
 

@@ -422,13 +422,41 @@ impl ApiService {
     
     /// ──────────────────── 真实 Agent 系统 ────────────────────
     
-    pub async fn agent_plan(&self, task: String) -> Result<AgentPlan, ApiError> {
-        crate::services::agent_executor::AgentEngine::plan(&self.config, task).await
-            .map_err(|e| ApiError::SearchError(e.to_string()))
+    pub async fn agent_plan(&self, task: String, use_rag: bool) -> Result<AgentPlan, ApiError> {
+        let mut plan = crate::services::agent_executor::AgentEngine::plan(&self.config, task.clone()).await
+            .map_err(|e| ApiError::SearchError(e.to_string()))?;
+        if use_rag {
+            plan.tasks.insert(0, AgentTask {
+                name: "知识库检索".into(), description: "搜索知识库中与任务相关的文档".into(),
+                tool: "knowledge_search".into(), depends_on: vec![], input_template: String::new(),
+            });
+            // 原有无依赖任务改为依赖知识库检索
+            for t in &mut plan.tasks[1..] {
+                if t.depends_on.is_empty() {
+                    t.depends_on.push("知识库检索".into());
+                }
+            }
+            plan.graph_structure = crate::services::agent_executor::AgentEngine::build_graph(&plan.tasks);
+        }
+        Ok(plan)
     }
     
     pub async fn agent_batch_start(&self, task: String, agent_tasks: Vec<AgentTask>) -> Result<(String, Vec<AgentExecResult>, bool), ApiError> {
         crate::services::agent_executor::AgentEngine::execute_batch_start(&self.config, task, agent_tasks).await
+            .map_err(|e| ApiError::SearchError(e.to_string()))
+    }
+    pub async fn agent_batch_start_rag(&self, task: String, agent_tasks: Vec<AgentTask>) -> Result<(String, Vec<AgentExecResult>, bool), ApiError> {
+        // 检索知识库，结果作为额外上下文
+        let search_res = self.search_vector(crate::models::SearchRequest { query: task.clone(), top_k: 3 }).await?;
+        let rag_ctx: String = search_res.results.iter().map(|r| r.content.clone()).collect::<Vec<_>>().join("\n---\n");
+        // 用修改后的描述替换第一批任务，带上知识库内容
+        let mut tasks = agent_tasks;
+        for t in &mut tasks {
+            if t.depends_on.is_empty() && !rag_ctx.is_empty() {
+                t.description = format!("{}\n\n知识库参考信息：\n{}", t.description, rag_ctx);
+            }
+        }
+        crate::services::agent_executor::AgentEngine::execute_batch_start(&self.config, task, tasks).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
     pub async fn agent_batch_next(&self, sid: &str) -> Result<(Vec<AgentExecResult>, bool), ApiError> {
