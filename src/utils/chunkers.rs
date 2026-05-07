@@ -2,8 +2,11 @@
 //!
 //! 提供 langchainrust crate 未内置的切分策略：
 //! - TokenTextSplitter: 按 token 数切分（估计算法，无需外部依赖）
+//! - SemanticChunker: 用 Embedding 检测话题边界
 
-use langchainrust::TextSplitter;
+use crate::errors::ProcessError;
+use langchainrust::{Document, TextSplitter, Embeddings, OpenAIEmbeddings};
+use std::sync::Arc;
 
 /// Token 文本分割器
 /// 按 token 数（估算）切分，精确控制上下文窗口
@@ -100,6 +103,97 @@ impl TokenTextSplitter {
 
         end
     }
+}
+
+/// 语义分割器：用 Embedding 检测话题边界
+pub struct SemanticChunker {
+    embeddings: Arc<OpenAIEmbeddings>,
+    min_chunk_chars: usize,
+    max_chunk_chars: usize,
+}
+
+impl SemanticChunker {
+    pub fn new(embeddings: Arc<OpenAIEmbeddings>, min_chunk_chars: usize, max_chunk_chars: usize) -> Self {
+        Self { embeddings, min_chunk_chars, max_chunk_chars }
+    }
+
+    pub async fn split_document_semantic(&self, document: &Document) -> Result<Vec<Document>, ProcessError> {
+        let sentences = split_sentences(&document.content);
+        if sentences.len() <= 1 {
+            return Ok(vec![document.clone()]);
+        }
+
+        // 批量调 Embedding API 算向量
+        let refs: Vec<&str> = sentences.iter().map(|s| s.as_str()).collect();
+        let vectors = self.embeddings.embed_documents(&refs).await
+            .map_err(|e| ProcessError::LoadError(format!("Embedding 失败: {}", e)))?;
+
+        if vectors.is_empty() || vectors.len() <= 1 {
+            return Ok(vec![document.clone()]);
+        }
+
+        // 计算相邻相似度，找话题边界
+        let mut boundaries = vec![0usize];
+        let mut current_chars = 0usize;
+
+        for i in 1..sentences.len() {
+            let sim = cosine_similarity(&vectors[i - 1], &vectors[i]);
+            let s_len = sentences[i].chars().count();
+
+            if sim < 0.45 && current_chars >= self.min_chunk_chars {
+                boundaries.push(i);
+                current_chars = 0;
+            } else if current_chars + s_len > self.max_chunk_chars {
+                boundaries.push(i);
+                current_chars = 0;
+            } else {
+                current_chars += s_len;
+            }
+        }
+        boundaries.push(sentences.len());
+
+        // 构建 chunks
+        let mut chunks = Vec::new();
+        for i in 0..boundaries.len() - 1 {
+            let start = boundaries[i];
+            let end = boundaries[i + 1];
+            let text: String = sentences[start..end].join("");
+            if text.trim().is_empty() { continue; }
+            let mut meta = document.metadata.clone();
+            meta.insert("chunk_strategy".to_string(), "semantic".to_string());
+            chunks.push(Document { content: text, metadata: meta, id: None });
+        }
+
+        if chunks.is_empty() {
+            Ok(vec![document.clone()])
+        } else {
+            Ok(chunks)
+        }
+    }
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
+}
+
+fn split_sentences(text: &str) -> Vec<String> {
+    let separators = ['。', '！', '？', '!', '?', '\n'];
+    let mut result = Vec::new();
+    let mut cur = String::new();
+    for c in text.chars() {
+        cur.push(c);
+        if separators.contains(&c) {
+            let s = cur.trim().to_string();
+            if !s.is_empty() { result.push(s); }
+            cur.clear();
+        }
+    }
+    let rem = cur.trim().to_string();
+    if !rem.is_empty() { result.push(rem); }
+    result
 }
 
 /// 估算 token 数（中文 1 char ≈ 1 token，英文 4 chars ≈ 1 token）

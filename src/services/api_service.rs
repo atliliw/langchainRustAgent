@@ -53,8 +53,11 @@ impl ApiService {
         // 4. 连接 SQLite，创建对话存储（含压缩）
         let conversation_store = Arc::new(ConversationStore::new(&config).await?);
         
-        // 5. 创建文档处理器
-        let processor = DocumentProcessor::new(config.clone());
+        // 5. 创建文档处理器（传入 Embedding API 供语义切分使用）
+        let processor = DocumentProcessor::with_embeddings(
+            config.clone(),
+            vector_store.embeddings.clone(),
+        );
         
         tracing::info!("BM25 存储使用 MongoDB 持久化");
         tracing::info!("对话记忆使用 SQLite 持久化（参考 OpenCode）: {}", config.sqlite.db_path);

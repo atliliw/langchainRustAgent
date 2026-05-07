@@ -7,22 +7,28 @@
 use crate::config::Config;
 use crate::errors::ProcessError;
 use crate::models::ChunkStrategy;
-use crate::utils::chunkers::TokenTextSplitter;
+use crate::utils::chunkers::{TokenTextSplitter, SemanticChunker};
 use langchainrust::{
-    Document, TextSplitter, RecursiveCharacterSplitter,
+    Document, TextSplitter, RecursiveCharacterSplitter, OpenAIEmbeddings,
     PDFLoader, TextLoader, JSONLoader, MarkdownLoader, CSVLoader,
     DocumentLoader,
 };
 use std::path::Path;
+use std::sync::Arc;
 
 /// 文档处理器：把上传的文件转成 LLM 可用的文档块
 pub struct DocumentProcessor {
     config: Config,
+    embeddings: Option<Arc<OpenAIEmbeddings>>,
 }
 
 impl DocumentProcessor {
     pub fn new(config: Config) -> Self {
-        Self { config }
+        Self { config, embeddings: None }
+    }
+
+    pub fn with_embeddings(config: Config, embeddings: Arc<OpenAIEmbeddings>) -> Self {
+        Self { config, embeddings: Some(embeddings) }
     }
     
     /// 处理文件：加载 + 分块 + 返回 (原始文档, 分块文档)
@@ -48,7 +54,7 @@ impl DocumentProcessor {
         }
         
         let original_docs = self.load_file(path, &extension).await?;
-        let chunks = self.split_documents_with_strategy(&original_docs, strategy)?;
+        let chunks = self.split_documents_with_strategy(&original_docs, strategy).await?;
         
         Ok((original_docs, chunks))
     }
@@ -67,7 +73,7 @@ impl DocumentProcessor {
     }
     
     /// 按策略创建分割器并分块
-    fn split_documents_with_strategy(&self, documents: &[Document], strategy: &ChunkStrategy) -> Result<Vec<Document>, ProcessError> {
+    async fn split_documents_with_strategy(&self, documents: &[Document], strategy: &ChunkStrategy) -> Result<Vec<Document>, ProcessError> {
         match strategy {
             ChunkStrategy::Token => {
                 // Token 模式：512 tokens/chunk, 50 tokens overlap
@@ -84,20 +90,38 @@ impl DocumentProcessor {
                 Ok(all_chunks)
             }
             ChunkStrategy::Semantic => {
-                // Semantic 模式暂不可用（需要 Embedding API 支持）
-                // 降级为 Recursive
-                tracing::warn!("Semantic chunking requires Embedding API, falling back to Recursive");
-                let splitter = RecursiveCharacterSplitter::new(500, 50);
-                let all_chunks: Vec<Document> = documents.iter()
-                    .flat_map(|doc| {
-                        let chunks = splitter.split_document(doc);
-                        chunks.into_iter().map(|chunk| {
-                            chunk.with_metadata("source_file", doc.metadata.get("source")
-                                .unwrap_or(&"".to_string()).clone())
-                        })
-                    })
-                    .collect();
-                Ok(all_chunks)
+                match &self.embeddings {
+                    Some(emb) => {
+                        let chunker = SemanticChunker::new(emb.clone(), 200, 2000);
+                        let mut all_chunks = Vec::new();
+                        for doc in documents {
+                            match chunker.split_document_semantic(doc).await {
+                                Ok(chunks) => all_chunks.extend(chunks),
+                                Err(_) => {
+                                    // 失败则降级
+                                    let splitter = RecursiveCharacterSplitter::new(500, 50);
+                                    let fallback = splitter.split_document(doc);
+                                    all_chunks.extend(fallback);
+                                }
+                            }
+                        }
+                        Ok(all_chunks)
+                    }
+                    None => {
+                        tracing::warn!("Semantic chunking: no Embedding API available, falling back to Recursive");
+                        let splitter = RecursiveCharacterSplitter::new(500, 50);
+                        let all_chunks: Vec<Document> = documents.iter()
+                            .flat_map(|doc| {
+                                let chunks = splitter.split_document(doc);
+                                chunks.into_iter().map(|chunk| {
+                                    chunk.with_metadata("source_file", doc.metadata.get("source")
+                                        .unwrap_or(&"".to_string()).clone())
+                                })
+                            })
+                            .collect();
+                        Ok(all_chunks)
+                    }
+                }
             }
             _ => {
                 let splitter = match strategy {

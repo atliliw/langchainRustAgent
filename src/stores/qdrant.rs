@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// - 元数据（来源文件名、上传时间等）
 pub struct QdrantStore {
     store: Arc<QdrantVectorStore>,    // Qdrant 向量库客户端
-    embeddings: Arc<OpenAIEmbeddings>,  // Embedding 模型（把文本→向量）
+    pub embeddings: Arc<OpenAIEmbeddings>,  // Embedding 模型（把文本→向量）
     qdrant_client: Arc<Qdrant>,         // Qdrant 底层客户端（用于按元数据删除）
     collection_name: String,            // 集合名
     config: Config,
