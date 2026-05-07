@@ -155,7 +155,15 @@ impl AgentEngine {
                     }
                 }
                 "llm_query" | "" => {
-                    let p = format!("任务：{}\n当前子任务：{}\n\n前置完成的任务结果：\n{}\n\n请基于前置结果执行当前子任务并输出。", task, at.description, if ctx.is_empty() { "无" } else { &ctx });
+                    let has_rag = at.description.contains("找到以下相关内容");
+                    let p = if has_rag {
+                        // 搜索结果在 description 里，不在 ctx 里（ctx 是前置任务结果，第一个任务没有前置）
+                        format!("以下是知识库搜索到的相关内容。请你用中文直接总结这些内容，不要自己编造搜索词或分析搜索词：\n\n{}", 
+                            at.description)
+                    } else {
+                        format!("任务：{}\n当前子任务：{}\n\n前置完成的任务结果：\n{}\n\n请基于前置结果执行当前子任务并输出。",
+                            task, at.description, if ctx.is_empty() { "无" } else { &ctx })
+                    };
                     let resp = tokio::time::timeout(Duration::from_secs(120), llm.invoke(vec![Message::human(&p)], None)).await;
                     match resp {
                         Ok(Ok(r)) => {

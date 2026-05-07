@@ -1,0 +1,54 @@
+[server]
+host = "0.0.0.0"
+port = 8090
+upload_dir = "uploads"
+
+[openai]
+api_key = "sk-a827c856f53e459bbfad5b8e1b962fc7"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+chat_model = "qwen-plus"
+embedding_model = "text-embedding-v1"
+
+[embedding]
+api_key = "sk-a827c856f53e459bbfad5b8e1b962fc7"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+model = "text-embedding-v1"
+
+[mongodb]
+uri = "mongodb://admin:admin123@192.168.10.100:27017"
+database = "langchainrust_demo"
+parent_collection = "bm25_parents"
+chunk_collection = "bm25_chunks"
+
+[sqlite]
+db_path = "conversations.db"
+
+[qdrant]
+url = "http://192.168.10.100:6334"
+collection_name = "demo_documents"
+vector_size = 1536
+distance = "Cosine"
+
+[document]
+chunk_size = 500
+chunk_overlap = 50
+supported_types = ["txt", "pdf", "md", "json", "csv"]
+
+[search]
+default_top_k = 5
+min_score = 0.1
+test_sample_count = 10
+
+[conversation]
+max_history_messages = 50
+max_tokens = 4000
+keep_first_n_messages = 2
+compress_threshold = 15
+keep_recent_messages = 5
+important_keywords = ["我的名字", "我是", "记住", "设定", "角色"]
+summary_model = "qwen-plus"
+
+[logging]
+level = "info"
+file_output = false
+log_file = "logs/demo.log"

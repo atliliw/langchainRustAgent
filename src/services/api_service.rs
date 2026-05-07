@@ -427,8 +427,9 @@ impl ApiService {
             .map_err(|e| ApiError::SearchError(e.to_string()))?;
         if use_rag {
             plan.tasks.insert(0, AgentTask {
-                name: "知识库检索".into(), description: "搜索知识库中与任务相关的文档".into(),
-                tool: "llm_query".into(), depends_on: vec![], input_template: String::new(),
+                name: "知识库检索".into(),
+                description: format!("搜索知识库，查询：{}", task),
+                tool: "llm_query".into(), depends_on: vec![], input_template: task.clone(),
             });
             // 原有无依赖任务改为依赖知识库检索
             for t in &mut plan.tasks[1..] {
@@ -452,7 +453,7 @@ impl ApiService {
         // 把搜索结果注入到"知识库检索"任务的描述
         let mut tasks = agent_tasks;
         if let Some(ks) = tasks.iter_mut().find(|t| t.name == "知识库检索") {
-            ks.description = format!("搜索知识库，找到以下相关内容：\n{}", if rag_ctx.is_empty() { "无匹配文档" } else { &rag_ctx });
+            ks.description = format!("搜索知识库（查询：{}），找到以下相关内容：\n{}", task, if rag_ctx.is_empty() { "无匹配文档" } else { &rag_ctx });
         }
         crate::services::agent_executor::AgentEngine::execute_batch_start(&self.config, task, tasks).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
