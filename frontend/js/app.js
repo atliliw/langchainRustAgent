@@ -1436,7 +1436,7 @@ async function runAgentPlan() {
     try {
         const res = await fetch(`${API_BASE}/agent/plan`, {
             method: 'POST', headers: {'Content-Type':'application/json'},
-            body: JSON.stringify({task})
+            body: JSON.stringify({task, use_rag: document.getElementById('agent-rag-toggle').checked})
         });
         if (!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.error||`${res.status}`); }
         const data = await res.json();
@@ -1502,7 +1502,7 @@ async function agentFetchAndShow(isFirst) {
     try {
         const url = isFirst ? '/api/agent/execute' : '/api/agent/next';
         const body = isFirst
-            ? JSON.stringify({task: _agentPlanData.original_task, agent_tasks: _agentPlanData.tasks})
+            ? JSON.stringify({task: _agentPlanData.original_task, agent_tasks: _agentPlanData.tasks, use_rag: document.getElementById('agent-rag-toggle').checked})
             : JSON.stringify({session_id: _agentSessionId});
 
         const res = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body});
@@ -1566,52 +1566,6 @@ async function agentFetchAndShow(isFirst) {
     } catch (e) {
         resDiv.innerHTML = '<div style="color:#e94560;padding:20px;">❌ ' + escapeHtml(e.message) + '</div>';
     }
-}
-
-// ──────── PageIndex ────────
-async function piBuild() {
-    const docId = document.getElementById('pi-doc-id').value.trim();
-    const title = document.getElementById('pi-title').value.trim();
-    const text = document.getElementById('pi-text').value.trim();
-    if (!text) { showToast('请输入文档内容'); return; }
-    document.getElementById('pi-result').innerHTML = '⏳ 构建中...';
-    try {
-        const res = await fetch('/api/pageindex/build', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({doc_id:docId, title, text})
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error);
-        let html = '✅ 构建成功<br>文档: ' + escapeHtml(data.doc_id) + '<br>段落数: ' + data.sections;
-        html += '<div style="margin-top:10px;font-size:12px;background:#eef2ff;padding:10px;border-radius:6px;"><strong>树结构：</strong><br>';
-        text.split('\n').filter(l => l.trim().startsWith('#')).forEach(l => {
-            const level = (l.match(/^#+/)[0] || '#').length;
-            html += '<div style="padding-left:' + (level-1)*20 + 'px;color:#4f46e5;">' + escapeHtml(l.trim()) + '</div>';
-        });
-        html += '</div>';
-        document.getElementById('pi-result').innerHTML = html;
-    } catch(e) { document.getElementById('pi-result').innerHTML = '❌ ' + escapeHtml(e.message); }
-}
-
-async function piSearch() {
-    const docId = document.getElementById('pi-doc-id').value.trim();
-    const query = document.getElementById('pi-query').value.trim();
-    if (!query) { showToast('请输入查询'); return; }
-    document.getElementById('pi-search-result').innerHTML = '⏳ LLM 导航中...';
-    try {
-        const res = await fetch('/api/pageindex/search', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({doc_id:docId, query})
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error);
-        let html = '<div style="background:#f8fafc;padding:15px;border-radius:8px;border:1px solid #e2e8f0;">';
-        html += '<p><strong>导航路径：</strong>' + (data.path||[]).join(' → ') + '</p>';
-        html += '<p><strong>查询：</strong>' + escapeHtml(data.query) + '</p>';
-        html += '<div style="background:white;padding:12px;border-radius:6px;border:1px solid #e2e8f0;margin-top:10px;max-height:300px;overflow-y:auto;">' + escapeHtml(data.result) + '</div>';
-        html += '</div>';
-        document.getElementById('pi-search-result').innerHTML = html;
-    } catch(e) { document.getElementById('pi-search-result').innerHTML = '❌ ' + escapeHtml(e.message); }
 }
 
 document.addEventListener('DOMContentLoaded', function() {

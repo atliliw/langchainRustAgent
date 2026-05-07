@@ -20,7 +20,6 @@
                 <div class="nav-item" onclick="showTab('chat')">💬 RAG对话</div>
                 <div class="nav-item" onclick="showTab('langgraph')">🔗 LangGraph</div>
                 <div class="nav-item" onclick="showTab('agent')">🤖 Agent</div>
-                <div class="nav-item" onclick="showTab('pageindex')">📑 PageIndex</div>
                 <div class="nav-item" onclick="showTab('aggregate')">🌐 AI聚合</div>
                 <div class="nav-item" onclick="showTab('monitor')">📊 系统监控</div>
                 <div class="nav-item" onclick="showTab('compress')">⚙️ 压缩策略</div>
@@ -202,6 +201,9 @@
                     <input type="text" id="agent-input" placeholder="输入任务，比如：用Rust写一个web服务器" style="flex:1;padding:10px;border:1px solid #8b5cf6;border-radius:6px;font-size:14px;">
                     <button class="btn" onclick="runAgentPlan()" style="background:#8b5cf6;color:white;white-space:nowrap;">📋 规划</button>
                 </div>
+                <label style="margin-top:8px;display:flex;align-items:center;gap:6px;font-size:13px;color:#64748b;">
+                    <input type="checkbox" id="agent-rag-toggle" checked> 🔍 检索知识库 (RAG)
+                </label>
             </div>
             <div id="agent-viz" style="background:#fff;border:2px solid #e2e8f0;border-radius:12px;padding:20px;margin-bottom:15px;display:none;">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;">
@@ -214,42 +216,6 @@
                 <button class="btn" onclick="runAgentExecute()" style="background:#8b5cf6;color:white;margin-bottom:15px;">▶ 执行所有任务</button>
             </div>
             <div id="agent-results"></div>
-        </div>
-        
-        <div id="pageindex-tab" class="card hidden">
-            <h2>📑 PageIndex 无向量 RAG 测试</h2>
-            <p style="color:#666;margin-bottom:15px;">LLM 推理导航文档树，无需 embedding 和向量库</p>
-            <div style="display:flex;gap:10px;margin-bottom:15px;">
-                <input type="text" id="pi-doc-id" placeholder="文档ID" value="test_doc" style="width:120px;padding:8px;border:1px solid #ddd;border-radius:4px;">
-                <input type="text" id="pi-title" placeholder="文档标题" value="Rust教程" style="width:200px;padding:8px;border:1px solid #ddd;border-radius:4px;">
-                <button class="btn" onclick="piBuild()" style="background:#6366f1;color:white;">🏗️ 构建树</button>
-            </div>
-            <div style="display:flex;gap:10px;margin-bottom:15px;">
-                <textarea id="pi-text" placeholder="输入带#标题的文档内容..." style="flex:1;height:200px;padding:10px;border:1px solid #ddd;border-radius:4px;font-size:13px;"></textarea>
-            </div>
-            <textarea id="pi-template" style="display:none;"># 什么是 Rust
-Rust 是一门系统级编程语言，由 Mozilla 研发，2015 年发布 1.0。
-
-# Rust 核心特性
-## 内存安全
-Rust 通过所有权机制保证内存安全，无需 GC。
-## 并发安全
-Rust 的 Send/Sync trait 在编译期防止数据竞争。
-## 零成本抽象
-Rust 的高级抽象编译后性能媲美 C/C++。
-
-# Rust 应用场景
-Rust 被用于 Linux 内核、Firefox、Cloudflare Workers 等。
-</textarea>
-            <div style="margin-bottom:10px;">
-                <button class="btn btn-small" onclick="document.getElementById('pi-text').value=document.getElementById('pi-template').textContent">📝 填入示例</button>
-            </div>
-            <div id="pi-result" style="background:#f8fafc;padding:15px;border-radius:8px;min-height:50px;margin-bottom:15px;"></div>
-            <div style="display:flex;gap:10px;">
-                <input type="text" id="pi-query" placeholder="输入搜索查询" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:4px;">
-                <button class="btn" onclick="piSearch()" style="background:#6366f1;color:white;">🔍 导航搜索</button>
-            </div>
-            <div id="pi-search-result" style="margin-top:15px;"></div>
         </div>
         
         <div id="aggregate-tab" class="card hidden">
