@@ -123,10 +123,14 @@ impl SemanticChunker {
             return Ok(vec![document.clone()]);
         }
 
-        // 批量调 Embedding API 算向量
-        let refs: Vec<&str> = sentences.iter().map(|s| s.as_str()).collect();
-        let vectors = self.embeddings.embed_documents(&refs).await
-            .map_err(|e| ProcessError::LoadError(format!("Embedding 失败: {}", e)))?;
+        // 分批调 Embedding API（单次最多25条）
+        let mut vectors = Vec::new();
+        for chunk in sentences.chunks(20) {
+            let refs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
+            let batch = self.embeddings.embed_documents(&refs).await
+                .map_err(|e| ProcessError::LoadError(format!("Embedding 失败: {}", e)))?;
+            vectors.extend(batch);
+        }
 
         if vectors.is_empty() || vectors.len() <= 1 {
             return Ok(vec![document.clone()]);

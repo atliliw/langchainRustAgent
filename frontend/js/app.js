@@ -69,26 +69,24 @@ function toggleAllDocs(cb) {
 
 async function previewDocument(parentId, title) {
     try {
-        const res = await fetch(`${API_BASE}/search/bm25`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({query: title, top_k: 20})
-        });
-        const data = await res.json();
-        const chunks = data.results.filter(r => r.metadata?.parent_id === parentId);
+        const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(title)}/chunks`);
+        const chunks = await res.json();
         
         const modal = document.getElementById('detail-modal');
         const contentDiv = document.getElementById('detail-content');
         
         let html = `<h3 style="color:#1e40af;margin-bottom:16px;">📄 ${escapeHtml(title)} (${chunks.length} chunks)</h3>`;
+        html += '<div style="margin-bottom:10px;display:flex;gap:10px;align-items:center;">';
+        html += `<span style="font-size:12px;color:#64748b;">切分策略: 从向量库直接查询</span>`;
+        html += '</div>';
         html += '<div style="display:grid;gap:12px;max-height:70vh;overflow-y:auto;">';
         chunks.forEach((chunk, idx) => {
             html += `<div class="chunk-card">
                 <div class="chunk-header">
                     <span style="background:#1e40af;color:white;padding:4px 10px;border-radius:4px;font-size:12px;">Chunk ${idx + 1}</span>
-                    <span style="font-size:12px;color:#64748b;">BM25: ${chunk.score.toFixed(2)}</span>
+                    <span style="font-size:11px;color:#94a3b8;">${chunk.content.length} chars</span>
                 </div>
-                <div class="chunk-content">${escapeHtml(chunk.content)}</div>
+                <div class="chunk-content" style="font-size:13px;line-height:1.6;color:#334155;white-space:pre-wrap;word-break:break-all;max-height:none;">${escapeHtml(chunk.content)}</div>
             </div>`;
         });
         html += '</div>';
@@ -96,6 +94,15 @@ async function previewDocument(parentId, title) {
         contentDiv.innerHTML = html;
         modal.style.display = 'block';
     } catch (e) { alert('加载预览失败: ' + e.message); }
+}
+
+function expandChunk(el) {
+    const content = el.querySelector('.chunk-content');
+    if (content._fullText === undefined) {
+        // First click: store full text and expand from server later if needed
+    }
+    content.style.whiteSpace = content.style.whiteSpace === 'pre-wrap' ? 'pre-line' : 'pre-wrap';
+    content.style.maxHeight = content.style.maxHeight ? '' : 'none';
 }
 
 async function deleteDocument(parentId, filename) {

@@ -17,6 +17,7 @@ use crate::errors::ApiError;
 use crate::models::*;
 use crate::stores::*;
 use crate::utils::DocumentProcessor;
+use langchainrust::Document;
 use crate::services::LangGraphDemoService;
 use crate::stores::ApiStatsSummary;
 use std::path::Path;
@@ -388,6 +389,11 @@ impl ApiService {
     pub async fn list_documents(&self) -> Result<Vec<DocumentInfo>, ApiError> {
         let documents = self.bm25_store.list_documents().await?;
         Ok(documents)
+    }
+
+    pub async fn get_document_chunks(&self, filename: &str) -> Result<Vec<Document>, ApiError> {
+        let chunks = self.vector_store.get_chunks_by_filename(filename).await?;
+        Ok(chunks)
     }
 
     pub async fn delete_document(&self, parent_id: &str, filename: &str) -> Result<DeleteDocumentResponse, ApiError> {

@@ -16,7 +16,7 @@ use langchainrust::{
     OpenAIEmbeddings,
 };
 use qdrant_client::Qdrant;
-use qdrant_client::qdrant::{Filter, Condition, DeletePointsBuilder};
+use qdrant_client::qdrant::{Filter, Condition, DeletePointsBuilder, ScrollPointsBuilder};
 use std::sync::Arc;
 
 /// Qdrant 向量存储
@@ -135,6 +135,30 @@ impl QdrantStore {
     /// 获取向量维度
     pub fn vector_size(&self) -> usize {
         self.config.qdrant.vector_size
+    }
+
+    /// 按文件名获取所有 chunks（用于预览切分结果）
+    pub async fn get_chunks_by_filename(&self, filename: &str) -> Result<Vec<Document>, StoreError> {
+        let filter = Filter::must([Condition::matches("original_filename", filename.to_string())]);
+        let request = ScrollPointsBuilder::new(&self.collection_name)
+            .filter(filter)
+            .with_payload(true)
+            .with_vectors(false)
+            .limit(1000);
+        let response = self.qdrant_client.scroll(request).await
+            .map_err(|e| StoreError::SearchError(format!("scroll失败: {}", e)))?;
+        let docs: Vec<Document> = response.result.into_iter().filter_map(|p| {
+            let content = match p.payload.get("content") {
+                Some(val) => match &val.kind {
+                    Some(qdrant_client::qdrant::value::Kind::StringValue(s)) => s.clone(),
+                    _ => return None,
+                },
+                None => return None,
+            };
+            let id = format!("{:?}", p.id);
+            Some(Document::new(content).with_id(id))
+        }).collect();
+        Ok(docs)
     }
 
     /// 按元数据删除文档（比如按文件名删除）

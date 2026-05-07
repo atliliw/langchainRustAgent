@@ -15,6 +15,19 @@ use axum::{
 };
 use std::sync::Arc;
 
+/// 获取文档的切分结果
+/// GET /api/documents/:filename/chunks
+pub async fn get_document_chunks(
+    State(state): State<Arc<AppState>>,
+    Path(filename): Path<String>,
+) -> Result<Json<Vec<serde_json::Value>>, ApiErrorResponse> {
+    let chunks: Vec<langchainrust::Document> = state.api.get_document_chunks(&filename).await?;
+    let items: Vec<serde_json::Value> = chunks.iter().enumerate().map(|(i, d)| {
+        serde_json::json!({"index": i, "content": d.content, "id": d.id})
+    }).collect();
+    Ok(Json(items))
+}
+
 /// 获取文档列表
 /// GET /api/documents
 pub async fn list_documents(

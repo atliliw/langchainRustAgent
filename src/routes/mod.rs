@@ -155,6 +155,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/documents/tag/:tag", axum::routing::get(document::get_documents_by_tag))
         // 按标签查文档
         
+        .route("/api/documents/:filename/chunks", axum::routing::get(document::get_document_chunks))
+        // 查看文档切分结果
+        
         .route("/api/documents/:parent_id", axum::routing::post(document::delete_document))
         // 删除单个文档
 
