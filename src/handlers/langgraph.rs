@@ -77,6 +77,25 @@ pub async fn decompose_task(
     Ok(Json(result))
 }
 
+/// ──────── PageIndex ────────
+
+pub async fn pageindex_build(
+    Json(request): Json<crate::services::pageindex::BuildRequest>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    let idx = crate::services::pageindex::PageIndex::build_and_store(&request)
+        .map_err(|e| ApiErrorResponse(axum::http::StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(serde_json::json!({"success":true,"doc_id":idx.doc_id,"sections":idx.root.children.len()})))
+}
+
+pub async fn pageindex_search(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<crate::services::pageindex::SearchRequest>,
+) -> Result<Json<crate::services::pageindex::SearchResponse>, ApiErrorResponse> {
+    let result = crate::services::pageindex::PageIndex::search(&state.config, &request).await
+        .map_err(|e| ApiErrorResponse(axum::http::StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(result))
+}
+
 /// 执行子任务
 /// POST /api/langgraph/execute
 /// 请求: { task: "原始任务", sub_tasks: [...] }
