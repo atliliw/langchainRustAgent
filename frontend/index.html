@@ -23,6 +23,7 @@
                 <div class="nav-item" onclick="showTab('aggregate')">🌐 AI聚合</div>
                 <div class="nav-item" onclick="showTab('monitor')">📊 系统监控</div>
                 <div class="nav-item" onclick="showTab('compress')">⚙️ 压缩策略</div>
+                <div class="nav-item" onclick="showTab('pageindex_search')">📑 PageIndex</div>
                 <div class="nav-item" onclick="showTab('sessions')">📋 会话列表</div>
             </div>
         </div>
@@ -72,7 +73,7 @@
             <div style="margin-bottom: 15px;">
                 <button class="btn" onclick="loadDocuments()">刷新列表</button>
             </div>
-            <div id="documents-list" style="max-height: 500px; overflow-y: auto;"></div>
+            <div id="documents-list"></div>
         </div>
         
         <div id="bm25-tab" class="card hidden">
@@ -407,6 +408,20 @@
             </div>
         </div>
         
+        <div id="pageindex_search-tab" class="card hidden">
+            <h2>📑 PageIndex 全文搜索</h2>
+            <p style="color: #666; margin-bottom: 15px;">搜索 PageIndex 文档树的节点内容（SQLite FTS5）</p>
+            <div class="search-box">
+                <input type="text" id="pageindex-query" placeholder="输入搜索内容..." />
+                <button class="btn" onclick="pageindexSearch()">搜索</button>
+            </div>
+            <div style="margin-top: 10px; color: #666;">
+                <label>返回结果数量：</label>
+                <input type="number" id="pageindex-top-k" value="10" min="1" max="50" style="width: 60px; padding: 5px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div id="pageindex-results"></div>
+        </div>
+
         <div id="sessions-tab" class="card hidden">
             <h2>会话管理</h2>
             <div id="sessions-list"></div>
@@ -429,7 +444,7 @@
         </div>
     </div>
     
-    <script src="js/app.js?v=4"></script>
+    <script src="js/app.js?t=20260508"></script>
     <script src="js/aggregate.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </body>

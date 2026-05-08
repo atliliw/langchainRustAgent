@@ -48,6 +48,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         
         .route("/api/search/compare", axum::routing::post(search::compare_search))
         // 对比测试: 同时跑三种搜索，看结果差异
+        
+        .route("/api/search/pageindex", axum::routing::post(search::search_pageindex))
+        // PageIndex 检索: SQLite FTS5 全文搜索
 
         // ────────────────────── 统计 & 清空 ──────────────────────
         .route("/api/stats", axum::routing::get(search::get_stats))
@@ -140,7 +143,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/agent/next", axum::routing::post(langgraph::agent_next))
         // 执行下一批
         
-
+        .route("/api/agent/execute_all", axum::routing::post(langgraph::agent_execute_all))
+        // 并行执行所有任务
+        
+        
 
         // ────────────────────── 文档管理 ──────────────────────
         .route("/api/documents", axum::routing::get(document::list_documents))
@@ -154,6 +160,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         
         .route("/api/documents/tag/:tag", axum::routing::get(document::get_documents_by_tag))
         // 按标签查文档
+        
+        .route("/api/documents/pageindex/list", axum::routing::get(document::list_pageindex_docs))
+        // PageIndex 文档列表
+        
+        .route("/api/documents/pageindex/tree/:doc_id", axum::routing::get(document::get_pageindex_tree))
+        // 查看 PageIndex 文档树
+        
+        .route("/api/documents/pageindex/delete/:doc_id", axum::routing::post(document::delete_pageindex_doc))
+        // 删除 PageIndex 文档
         
         .route("/api/documents/:filename/chunks", axum::routing::get(document::get_document_chunks))
         // 查看文档切分结果

@@ -15,6 +15,8 @@ pub enum ChunkStrategy {
     Token,
     /// 语义分割：用 Embedding 检测话题边界，按语义切分
     Semantic,
+    /// PageIndex：LLM 导航文档树，无需向量化
+    PageIndex,
 }
 
 impl Default for ChunkStrategy {
@@ -32,6 +34,7 @@ impl ChunkStrategy {
             ChunkStrategy::Paragraph => "paragraph",
             ChunkStrategy::Token => "token",
             ChunkStrategy::Semantic => "semantic",
+            ChunkStrategy::PageIndex => "pageindex",
         }
     }
 
@@ -42,6 +45,7 @@ impl ChunkStrategy {
             "paragraph" => Self::Paragraph,
             "token" => Self::Token,
             "semantic" => Self::Semantic,
+            "pageindex" => Self::PageIndex,
             _ => Self::Recursive,
         }
     }

@@ -251,7 +251,7 @@ impl AgentEngine {
                 let ctx = ctx.clone();
 
                 let handle = tokio::spawn(async move {
-                    let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(512));
+        let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(2048));
                     let task_start = Instant::now();
                     let (output, tokens) = match at.tool.as_str() {
                         "llm_query" | "" => {

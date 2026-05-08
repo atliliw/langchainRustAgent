@@ -16,4 +16,7 @@ pub enum StoreError {
 
     #[error("文档不存在: {0}")]
     NotFound(String),
+
+    #[error("建表失败: {0}")]
+    CreateTableError(String),
 }

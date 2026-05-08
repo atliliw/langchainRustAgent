@@ -28,6 +28,35 @@ pub async fn get_document_chunks(
     Ok(Json(items))
 }
 
+/// 获取 PageIndex 文档列表
+/// GET /api/documents/pageindex/list
+pub async fn list_pageindex_docs(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<serde_json::Value>>, ApiErrorResponse> {
+    let docs = state.api.list_pageindex_docs().await?;
+    Ok(Json(docs))
+}
+
+/// 删除 PageIndex 文档
+/// POST /api/documents/pageindex/delete/:doc_id
+pub async fn delete_pageindex_doc(
+    State(state): State<Arc<AppState>>,
+    Path(doc_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    state.api.delete_pageindex_doc(&doc_id).await?;
+    Ok(Json(serde_json::json!({"success":true})))
+}
+
+/// 获取 PageIndex 文档树
+/// GET /api/documents/pageindex/tree/:doc_id
+pub async fn get_pageindex_tree(
+    State(state): State<Arc<AppState>>,
+    Path(doc_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    let tree = state.api.get_pageindex_tree(&doc_id).await?;
+    Ok(Json(tree))
+}
+
 /// 获取文档列表
 /// GET /api/documents
 pub async fn list_documents(

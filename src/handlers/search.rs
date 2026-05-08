@@ -61,6 +61,16 @@ pub async fn compare_search(
     Ok(Json(response))
 }
 
+/// PageIndex 全文检索
+/// POST /api/search/pageindex
+pub async fn search_pageindex(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SearchRequest>,
+) -> Result<Json<Vec<serde_json::Value>>, ApiErrorResponse> {
+    let results = state.api.search_pageindex(&request.query, request.top_k).await?;
+    Ok(Json(results))
+}
+
 /// 获取统计信息
 /// GET /api/stats
 /// 返回: 文档总数、向量维度、对话数等

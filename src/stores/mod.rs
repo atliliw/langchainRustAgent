@@ -23,3 +23,4 @@ pub use conversation::ApiTypeStats;
 pub use conversation::RecentCall;
 pub use conversation::estimate_tokens;
 pub use content_store::ContentStore;
+pub mod pageindex_store;  // PageIndex 文档树存储
