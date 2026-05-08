@@ -48,6 +48,7 @@
                         <option value="paragraph">段落分割（完整段落）</option>
                         <option value="token">Token分割（512tokens）</option>
                         <option value="semantic">语义分割（Embedding）</option>
+                        <option value="pageindex">PageIndex 文档树（无需向量）</option>
                     </select>
                 </label>
                 <span style="font-size: 12px; color: #94a3b8;" id="chunk-strategy-desc">按段落→行→句→字符递归切分，chunk_size=500</span>
@@ -428,7 +429,7 @@
         </div>
     </div>
     
-    <script src="js/app.js?v=3"></script>
+    <script src="js/app.js?v=4"></script>
     <script src="js/aggregate.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </body>

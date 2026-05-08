@@ -3,10 +3,12 @@ use crate::errors::GraphDemoError;
 use crate::models::*;
 use langchainrust::{language_models::OpenAIChat, schema::Message, core::runnables::Runnable};
 use std::collections::{HashSet, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::time::Duration;
 use uuid::Uuid;
+use futures_util::future::join_all;
+use futures_util::FutureExt;
 
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("llm_query","直接用 LLM 回答"),("web_search","搜索网络获取信息"),("weather","查询天气"),
@@ -155,7 +157,10 @@ impl AgentEngine {
                     let p = format!("任务：{}\n当前子任务：{}\n\n请基于你的知识回答。{}", task, at.description, rag_section);
                     let resp = llm.invoke(vec![Message::human(&p)], None).await;
                     match resp {
-                        Ok(r) => (r.content.clone(), r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0)),
+                        Ok(r) => {
+                            let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or_else(|| estimate_token_usage(&p, &r.content));
+                            (r.content.clone(), t)
+                        }
                         Err(e) => (format!("执行失败: {}", e), 0),
                     }
                 }
@@ -170,10 +175,12 @@ impl AgentEngine {
                     }
                 }
                 "rag_search" => {
+                    // Embedding API 按 token 计费，查询文本也消耗 token
+                    let embed_tokens = at.input_template.chars().count().max(1);
                     if rag_context.is_empty() {
-                        ("知识库中未找到相关文档，请基于自身知识回答。".to_string(), 0)
+                        (format!("知识库中未找到相关文档（Embedding 消耗 ~{} tokens）", embed_tokens), embed_tokens)
                     } else {
-                        (format!("知识库检索到以下相关信息：\n\n{}", rag_context), 0)
+                        (format!("知识库检索到以下相关信息（Embedding 消耗 ~{} tokens）：\n\n{}", embed_tokens, rag_context), embed_tokens)
                     }
                 }
                 "llm_query" | "" => {
@@ -181,7 +188,7 @@ impl AgentEngine {
                     let resp = tokio::time::timeout(Duration::from_secs(120), llm.invoke(vec![Message::human(&p)], None)).await;
                     match resp {
                         Ok(Ok(r)) => {
-                            let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
+                            let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or_else(|| estimate_token_usage(&p, &r.content));
                             (r.content.clone(), t)
                         }
                         _ => ("执行失败".to_string(), 0),
@@ -192,7 +199,7 @@ impl AgentEngine {
                     let resp = llm.invoke(vec![Message::human(&p)], None).await;
                     match resp {
                         Ok(r) => {
-                            let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
+                            let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or_else(|| estimate_token_usage(&p, &r.content));
                             (r.content.clone(), t)
                         }
                         Err(e) => (format!("执行失败: {}", e), 0),
@@ -208,35 +215,115 @@ impl AgentEngine {
         Ok(results)
     }
 
+    /// ── 按依赖分批并行执行：同批任务 spawn 并行，不同批串行 ──
+    /// 例: A → [B, C] → D  => 第一批: A, 第二批: B+C(并行), 第三批: D
     pub async fn execute_all_batches(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String) -> Result<AgentExecResponse, GraphDemoError> {
         let total_start = Instant::now();
         let rag_section = if rag_context.is_empty() { String::new() } else { format!("\n\n知识库检索结果：\n{}", rag_context) };
-        // 一次性调 LLM 执行所有子任务，避免 N 次串行调用
-        let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
-        let task_list: String = agent_tasks.iter()
-            .map(|t| format!("- {}：{}", t.name, t.description))
-            .collect::<Vec<_>>().join("\n");
-        let prompt = format!(
-            "依次执行以下子任务，为每个输出结果。\n\n原始任务：{task}\n\n子任务：\n{task_list}{rag}\n\n返回JSON数组：\n[{{\"name\":\"子任务名\",\"output\":\"结果\"}}]\n只返回JSON。",
-            task = task, task_list = task_list, rag = rag_section,
-        );
-        let resp = llm.invoke(vec![Message::human(&prompt)], None).await
-            .map_err(|e| GraphDemoError::ExecutionError(format!("执行失败: {}", e)))?;
-        let cleaned = resp.content.trim_start_matches("```json").trim_start_matches("```")
-            .trim_end_matches("```").trim();
-        #[derive(serde::Deserialize)] struct TaskOut { name: String, output: String }
-        let outputs: Vec<TaskOut> = serde_json::from_str(cleaned).unwrap_or_default();
-        let total_tok = resp.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
-        let per_tok = total_tok / std::cmp::max(1, agent_tasks.len());
-        let per_ms = total_start.elapsed().as_millis() as u64 / std::cmp::max(1, agent_tasks.len() as u64);
 
-        let results: Vec<AgentExecResult> = agent_tasks.iter().enumerate().map(|(i, at)| {
-            let out = outputs.get(i).map(|o| o.output.clone()).unwrap_or_default();
-            AgentExecResult { task_name: at.name.clone(), tool: at.tool.clone(), input_summary: at.input_template.clone(), output: out, duration_ms: per_ms, tokens: per_tok }
-        }).collect();
+        async fn query_weather(city: &str) -> Result<String, String> {
+            let e: String = city.chars().map(|c| match c { 'A'..='Z'|'a'..='z'|'0'..='9'|'-'|'_'|'.'|'~' => c.to_string(), _ => format!("%{:02X}",c as u8) }).collect();
+            reqwest::get(&format!("https://wttr.in/{}?format=%C+|+%t+|+%h+|+%w&lang=zh", e)).await
+                .map_err(|e| e.to_string())?.text().await.map_err(|e| e.to_string())
+        }
 
-        let fa = results.last().map(|r| r.output.clone()).unwrap_or_default();
-        Ok(AgentExecResponse{results, final_answer: fa, total_duration_ms: total_start.elapsed().as_millis() as u64, total_tokens: total_tok})
+        let mut done: HashSet<String> = HashSet::new();
+        let mut all_results: Vec<AgentExecResult> = Vec::new();
+
+        // ★ 持续一批一批处理，直到所有任务完成
+        while done.len() < agent_tasks.len() {
+            let batch = Self::ready_batch(&agent_tasks, &done);
+            if batch.is_empty() {
+                break; // 没有可执行任务了（可能循环依赖）
+            }
+
+            // 前置结果做上下文（与 run_batch 一致）
+            let ctx: String = all_results.iter()
+                .map(|r| format!("【{}】\n{}", r.task_name, r.output))
+                .collect::<Vec<_>>().join("\n\n");
+
+            // ★ 本批任务全部 spawn 并行执行
+            let mut handles = Vec::new();
+            for at in batch {
+                let config = config.clone();
+                let task = task.clone();
+                let rag = rag_section.clone();
+                let ctx = ctx.clone();
+
+                let handle = tokio::spawn(async move {
+                    let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(512));
+                    let task_start = Instant::now();
+                    let (output, tokens) = match at.tool.as_str() {
+                        "llm_query" | "" => {
+                            let p = if ctx.is_empty() {
+                                format!("任务：{}\n当前子任务：{}\n\n请执行当前子任务并输出结果。{}", task, at.description, rag)
+                            } else {
+                                format!("任务：{}\n当前子任务：{}\n\n前置完成的任务结果：\n{}\n\n请基于前置结果执行当前子任务并输出。{}",
+                                    task, at.description, ctx, rag)
+                            };
+                            match tokio::time::timeout(Duration::from_secs(120), llm.invoke(vec![Message::human(&p)], None)).await {
+                                Ok(Ok(r)) => (r.content.clone(), r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0)),
+                                _ => ("执行失败".to_string(), 0),
+                            }
+                        }
+                        "weather" => {
+                            let city_prompt = format!("任务：{}\n当前子任务：{}\n\n请输出要查询天气的城市名，不要多余内容。", task, at.description);
+                            let llm2 = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(512));
+                            let city = llm2.invoke(vec![Message::human(&city_prompt)], None).await
+                                .map(|r| r.content.trim().to_string())
+                                .unwrap_or_else(|_| at.description.clone());
+                            match query_weather(&city).await {
+                                Ok(r) => (format!("{}的天气：{}", city, r), 0),
+                                Err(e) => (format!("天气查询失败: {}", e), 0),
+                            }
+                        }
+                        "rag_search" => {
+                            if rag.is_empty() {
+                                ("知识库中未找到相关文档，请基于自身知识回答。".to_string(), 0)
+                            } else {
+                                (format!("知识库检索到以下相关信息：\n\n{}", rag), 0)
+                            }
+                        }
+                        _ => {
+                            let p = format!("任务：{}\n子任务：{}\n(工具:{} 不可用，请直接用 LLM 执行)\n\n输出结果。{}", task, at.description, at.tool, rag);
+                            match llm.invoke(vec![Message::human(&p)], None).await {
+                                Ok(r) => (r.content.clone(), r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0)),
+                                Err(e) => (format!("执行失败: {}", e), 0),
+                            }
+                        }
+                    };
+                    let elapsed = task_start.elapsed().as_millis() as u64;
+                    AgentExecResult {
+                        task_name: at.name,
+                        tool: at.tool,
+                        input_summary: at.input_template,
+                        output,
+                        duration_ms: elapsed,
+                        tokens,
+                    }
+                });
+                handles.push(handle);
+            }
+
+            // ★ 等本批全部完成，加入已完成集合
+            for handle in handles {
+                let result = handle.await
+                    .map_err(|e| GraphDemoError::ExecutionError(format!("任务崩溃: {}", e)))?;
+                done.insert(result.task_name.clone());
+                all_results.push(result);
+            }
+        }
+
+        let total_duration = total_start.elapsed().as_millis() as u64;
+        let total_tokens: usize = all_results.iter().map(|r| r.tokens).sum();
+        let fa = all_results.last().map(|r| r.output.clone()).unwrap_or_default();
+
+        Ok(AgentExecResponse {
+            results: all_results,
+            final_answer: fa,
+            total_duration_ms: total_duration,
+            total_tokens,
+        })
     }
 
     /// ── 完成验证 ──
@@ -268,6 +355,13 @@ impl AgentEngine {
         }
         Self::batch_finalize(&sid).await
     }
+}
+
+/// 当 API 不返回 token_usage 时，用文本长度估算 token 数
+fn estimate_token_usage(prompt: &str, response: &str) -> usize {
+    let input_tokens = prompt.chars().count() / 2 + 1;
+    let output_tokens = response.chars().count() / 2 + 1;
+    input_tokens + output_tokens
 }
 
 #[cfg(test)]

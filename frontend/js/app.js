@@ -121,7 +121,8 @@ const CHUNK_STRATEGY_DESC = {
     small: 'chunk_size=200，适合精准检索场景',
     paragraph: '按段落分割（\\n\\n），保留完整段落结构',
     token: '按512 tokens切分，精确控制上下文窗口，主流RAG标准',
-    semantic: '用Embedding检测话题边界切分（暂降级为Recursive）',
+    semantic: '用Embedding检测话题边界切分',
+    pageindex: 'LLM导航文档树，无需Embedding和向量库，按标题层级组织',
 };
 
 function updateChunkStrategyDesc() {
@@ -141,8 +142,13 @@ async function uploadFile(file) {
     try {
         const res = await fetch(`${API_BASE}/upload`, { method: 'POST', body: formData });
         const data = await res.json();
-        if (data.success) showResult('upload-result', 'success', `${data.message}<br>文档块数: ${data.chunk_count}`);
-        else showResult('upload-result', 'error', data.error || '上传失败');
+        if (data.success) {
+            let extra = '';
+            if (data.chunk_strategy === 'pageindex') {
+                extra = `<br><a href="#" onclick="showTab('pageindex');return false;" style="color:#6366f1;">📑 查看文档树</a>`;
+            }
+            showResult('upload-result', 'success', `${data.message}<br>文档块数: ${data.chunk_count}${extra}`);
+        } else showResult('upload-result', 'error', data.error || '上传失败');
         fetchStats();
     } catch (e) { showResult('upload-result', 'error', `上传失败: ${e.message}`); }
     document.getElementById('upload-progress').classList.add('hidden');
@@ -1444,6 +1450,49 @@ async function loadDocumentsByTag(tag) {
 
 let _agentPlanData = null;
 
+// ★ 执行所有任务（真正并行）
+async function runAgentExecute() {
+    if (!_agentPlanData) { showToast('请先规划'); return; }
+    const resDiv = document.getElementById('agent-results');
+    resDiv.innerHTML = '<div style="text-align:center;padding:30px;color:#8b5cf6;">⏳ 并行执行所有任务中...</div>';
+
+    try {
+        const res = await fetch(`${API_BASE}/agent/execute_all`, {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({
+                task: _agentPlanData.original_task,
+                agent_tasks: _agentPlanData.tasks,
+                use_rag: document.getElementById('agent-rag-toggle').checked
+            })
+        });
+        if (!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.error||`${res.status}`); }
+        const data = await res.json();
+
+        const annotations = {};
+        (data.results || []).forEach(r => { annotations[r.task_name] = {label: r.output.substring(0,30), ms: 0}; });
+        document.getElementById('agent-container').innerHTML = renderGraphHtml(_agentPlanData.graph_structure, annotations);
+
+        let html = '<div style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;margin-top:10px;">';
+        html += '<h4 style="margin:0 0 10px 0;color:#7c3aed;">并行执行结果</h4>';
+        html += `<div style="font-size:13px;color:#64748b;margin-bottom:10px;">⏱ ${data.total_duration_ms}ms | 🪙 ${data.total_tokens} tokens</div>`;
+        html += '<table style="width:100%"><thead><tr style="background:#f5f3ff;"><th>任务</th><th>输出</th><th style="width:100px;">耗时</th><th style="width:60px;">Token</th></tr></thead><tbody>';
+        (data.results || []).forEach(r => {
+            html += '<tr><td style="padding:8px;font-weight:bold;">' + escapeHtml(r.task_name) + '</td>';
+            html += '<td style="padding:8px;font-size:13px;">' + escapeHtml(r.output) + '</td>';
+            html += '<td style="padding:4px;font-size:11px;color:#94a3b8;text-align:right;">' + (r.duration_ms||0) + 'ms</td>';
+            html += '<td style="padding:4px;font-size:11px;color:#94a3b8;text-align:right;">' + (r.tokens||0) + '</td></tr>';
+        });
+        html += '</tbody></table></div>';
+        if (data.final_answer) {
+            html += '<div style="border:1px solid #d1fae5;background:#ecfdf5;border-radius:8px;padding:15px;margin-top:10px;">';
+            html += '<strong style="color:#059669;">最终答案：</strong><br>' + escapeHtml(data.final_answer) + '</div>';
+        }
+        resDiv.innerHTML = html;
+    } catch (e) {
+        resDiv.innerHTML = '<div style="color:#e94560;padding:20px;">❌ ' + escapeHtml(e.message) + '</div>';
+    }
+}
+
 async function runAgentPlan() {
     const task = document.getElementById('agent-input').value.trim();
     if (!task) { showToast('请输入任务'); return; }
@@ -1542,11 +1591,11 @@ async function agentFetchAndShow(isFirst) {
 
         let html = '<div id="agent-results-table" style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;margin-top:10px;">';
         html += '<h4 style="margin:0 0 10px 0;color:#7c3aed;">执行结果</h4>';
-        html += '<table style="width:100%"><thead><tr style="background:#f5f3ff;"><th>任务</th><th>输出</th><th style="width:100px;">消耗</th></tr></thead><tbody>';
+        html += '<table style="width:100%"><thead><tr style="background:#f5f3ff;"><th>任务</th><th>输出</th><th style="width:70px;">耗时/Token</th></tr></thead><tbody>';
         _agentAllResults.forEach(r => {
             html += '<tr><td style="padding:8px;font-weight:bold;">' + escapeHtml(r.task_name) + '</td>';
             html += '<td style="padding:8px;font-size:13px;">' + escapeHtml(r.output) + '</td>';
-            html += '<td style="padding:4px;font-size:11px;color:#94a3b8;text-align:right;">' + (r.duration_ms||0) + 'ms | ' + (r.tokens||0) + 't</td></tr>';
+            html += '<td style="padding:4px;font-size:10px;color:#94a3b8;text-align:center;line-height:1.6;">' + (r.duration_ms||0) + 'ms<br>' + (r.tokens||0) + 't</td></tr>';
         });
         html += '</tbody></table>';
 
@@ -1574,7 +1623,7 @@ async function agentFetchAndShow(isFirst) {
                     let row = document.createElement('tr');
                     row.innerHTML = '<td style="padding:8px;font-weight:bold;">' + escapeHtml(r.task_name) + '</td>'
                         + '<td style="padding:8px;font-size:13px;">' + escapeHtml(r.output) + '</td>'
-                        + '<td style="padding:4px;font-size:11px;color:#94a3b8;text-align:right;">' + (r.duration_ms||0) + 'ms | ' + (r.tokens||0) + 't</td>';
+                        + '<td style="padding:4px;font-size:10px;color:#94a3b8;text-align:center;line-height:1.6;">' + (r.duration_ms||0) + 'ms<br>' + (r.tokens||0) + 't</td>';
                     tbody.appendChild(row);
                 });
             }
