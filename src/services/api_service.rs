@@ -16,10 +16,13 @@ use crate::config::Config;
 use crate::errors::ApiError;
 use crate::models::*;
 use crate::stores::*;
+use crate::stores::pageindex_store::PageIndexStore;
 use crate::utils::DocumentProcessor;
-use langchainrust::Document;
 use crate::services::LangGraphDemoService;
+use crate::services::pageindex::PageIndex;
 use crate::stores::ApiStatsSummary;
+use langchainrust::Document;
+use langchainrust::language_models::OpenAIChat;
 use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -30,6 +33,7 @@ pub struct ApiService {
     pub bm25_store: Arc<BM25Store>,                // BM25 关键词存储（MongoDB）
     pub hybrid_store: Arc<HybridStore>,             // 混合检索（RRF）
     pub conversation_store: Arc<ConversationStore>, // 对话历史（SQLite）
+    pub pageindex_store: PageIndexStore,             // PageIndex 文档树 SQLite
     processor: DocumentProcessor,                   // 文档处理器（加载+分块）
     config: Config,                                 // 配置
 }
@@ -59,6 +63,9 @@ impl ApiService {
             config.clone(),
             vector_store.embeddings.clone(),
         );
+
+        // 6. 初始化 PageIndex SQLite 存储（同 converserions.db）
+        let pageindex_store = PageIndexStore::new(&config).await?;
         
         tracing::info!("BM25 存储使用 MongoDB 持久化");
         tracing::info!("对话记忆使用 SQLite 持久化（参考 OpenCode）: {}", config.sqlite.db_path);
@@ -68,6 +75,7 @@ impl ApiService {
             bm25_store,
             hybrid_store,
             conversation_store,
+            pageindex_store,
             processor,
             config,
         })
@@ -82,7 +90,26 @@ impl ApiService {
 
     /// 上传并处理文件（指定切分策略）
     /// 流程：加载 → 分块 → Qdrant(向量) + MongoDB(BM25)
+    /// PageIndex 模式不走向量化，直接构建文档树
     pub async fn upload_file_with_strategy(&self, file_path: &Path, original_name: &str, strategy: ChunkStrategy) -> Result<UploadResponse, ApiError> {
+        // PageIndex 模式：构建文档树，不走向量化
+        if strategy == ChunkStrategy::PageIndex {
+            let text = std::fs::read_to_string(file_path)
+                .map_err(|e| ApiError::SearchError(format!("读取文件失败: {}", e)))?;
+            let doc_id = format!("pi_{}", uuid::Uuid::new_v4());
+            let llm = OpenAIChat::new(self.config.to_langchain_openai_config());
+            PageIndex::build_from_text(&self.pageindex_store, &doc_id, original_name, &text, Some(&llm)).await
+                .map_err(|e| ApiError::SearchError(e))?;
+            return Ok(UploadResponse {
+                success: true,
+                document_count: 1,
+                chunk_count: 0,
+                message: format!("PageIndex 文档树构建成功（{}），无需向量化", original_name),
+                document_ids: vec![doc_id],
+                chunk_strategy: "pageindex".to_string(),
+            });
+        }
+
         let (original_docs, chunks) = self.processor.process_file_with_strategy(file_path, &strategy).await?;
         //   ↑ 原始文档          ↑ 分块后的chunks
         
@@ -151,6 +178,69 @@ impl ApiService {
         })
     }
     
+    /// 删除 PageIndex 文档
+    pub async fn delete_pageindex_doc(&self, doc_id: &str) -> Result<(), ApiError> {
+        self.pageindex_store.delete_doc(doc_id).await?;
+        Ok(())
+    }
+
+    /// PageIndex 文档列表
+    pub async fn list_pageindex_docs(&self) -> Result<Vec<serde_json::Value>, ApiError> {
+        let docs = self.pageindex_store.list_docs().await?;
+        Ok(docs.into_iter().map(|(id, title)| serde_json::json!({
+            "id": id, "title": title, "type": "pageindex"
+        })).collect())
+    }
+
+    /// PageIndex 获取完整文档树（返回节点列表+标题）
+    pub async fn get_pageindex_tree(&self, doc_id: &str) -> Result<serde_json::Value, ApiError> {
+        use sqlx::Row;
+        let title: Option<String> = sqlx::query_scalar("SELECT title FROM pageindex_docs WHERE doc_id = ?")
+            .bind(doc_id).fetch_optional(&self.pageindex_store.pool).await
+            .map_err(|e| ApiError::SearchError(e.to_string()))?
+            .unwrap_or_default();
+
+        let rows = sqlx::query(
+            "SELECT node_id, parent_node_id, title, content, level, summary FROM pageindex_nodes WHERE doc_id = ? ORDER BY id ASC"
+        )
+        .bind(doc_id)
+        .fetch_all(&self.pageindex_store.pool)
+        .await
+        .map_err(|e| ApiError::SearchError(e.to_string()))?;
+
+        let nodes: Vec<serde_json::Value> = rows.into_iter().map(|r| {
+            serde_json::json!({
+                "node_id": r.get::<String,_>(0),
+                "parent_node_id": r.get::<Option<String>,_>(1),
+                "title": r.get::<String,_>(2),
+                "content": r.get::<String,_>(3),
+                "level": r.get::<i32,_>(4),
+                "summary": r.get::<String,_>(5),
+            })
+        }).collect();
+
+        Ok(serde_json::json!({
+            "doc_id": doc_id,
+            "title": title,
+            "nodes": nodes,
+            "total": nodes.len()
+        }))
+    }
+
+    /// PageIndex 全文检索：SQLite FTS5
+    pub async fn search_pageindex(&self, query: &str, top_k: usize) -> Result<Vec<serde_json::Value>, ApiError> {
+        let results = self.pageindex_store.search(query, top_k).await?;
+        Ok(results.into_iter().map(|r| serde_json::json!({
+            "doc_id": r.doc_id,
+            "doc_title": r.doc_title,
+            "title": r.title,
+            "content": r.content_preview,
+            "path": r.path,
+            "level": r.level,
+            "summary": r.summary,
+        })).collect())
+    }
+
     /// BM25 检索：关键词匹配 → MongoDB BM25 索引
     pub fn search_bm25(&self, request: SearchRequest) -> Result<SearchResponse, ApiError> {
         let results = self.bm25_store.search(&request.query, request.top_k)?;

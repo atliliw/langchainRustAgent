@@ -80,18 +80,21 @@ pub async fn decompose_task(
 /// ──────── PageIndex ────────
 
 pub async fn pageindex_build(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<crate::services::pageindex::BuildRequest>,
 ) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
-    let idx = crate::services::pageindex::PageIndex::build_and_store(&request)
+    let idx = crate::services::pageindex::PageIndex::build_from_text(
+        &state.api.pageindex_store, &request.doc_id, &request.title, &request.text, None,
+    ).await
         .map_err(|e| ApiErrorResponse(axum::http::StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(Json(serde_json::json!({"success":true,"doc_id":idx.doc_id,"sections":idx.root.children.len()})))
+    Ok(Json(serde_json::json!({"success":true,"doc_id":idx.doc_id,"node_count":idx.node_count})))
 }
 
 pub async fn pageindex_search(
     State(state): State<Arc<AppState>>,
     Json(request): Json<crate::services::pageindex::SearchRequest>,
 ) -> Result<Json<crate::services::pageindex::SearchResponse>, ApiErrorResponse> {
-    let result = crate::services::pageindex::PageIndex::search(&state.config, &request).await
+    let result = crate::services::pageindex::PageIndex::search(&state.config, &state.api.pageindex_store, &request).await
         .map_err(|e| ApiErrorResponse(axum::http::StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(Json(result))
 }
@@ -142,4 +145,18 @@ pub async fn agent_next(
     let sid = request["session_id"].as_str().unwrap_or("");
     let (results, has_next) = state.api.agent_batch_next(sid).await?;
     Ok(Json(serde_json::json!({"results":results,"has_next":has_next})))
+}
+
+/// 执行所有任务（真正并行）
+/// POST /api/agent/execute_all
+pub async fn agent_execute_all(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<serde_json::Value>,
+) -> Result<Json<AgentExecResponse>, ApiErrorResponse> {
+    let task = request["task"].as_str().unwrap_or("").to_string();
+    let tasks: Vec<AgentTask> = serde_json::from_value(request["agent_tasks"].clone())
+        .unwrap_or_default();
+    let use_rag = request["use_rag"].as_bool().unwrap_or(false);
+    let result = state.api.agent_execute_all(task, tasks, use_rag).await?;
+    Ok(Json(result))
 }

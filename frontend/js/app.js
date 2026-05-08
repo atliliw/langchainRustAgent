@@ -35,30 +35,64 @@ async function loadDocuments() {
     const listEl = document.getElementById('documents-list');
     listEl.innerHTML = '<div class="loading">加载文档列表...</div>';
     try {
-        const res = await fetch(`${API_BASE}/documents`);
-        const documents = await res.json();
-        if (documents.length === 0) { listEl.innerHTML = '<p style="color: #666;">暂无文档，请先上传</p>'; return; }
+        // 同时加载普通文档和 PageIndex 文档
+        const [docRes, piRes] = await Promise.all([
+            fetch(`${API_BASE}/documents`),
+            fetch(`${API_BASE}/documents/pageindex/list`)
+        ]);
+        const documents = await docRes.json();
+        const piDocs = await piRes.json();
+        
+        if (documents.length === 0 && piDocs.length === 0) {
+            listEl.innerHTML = '<p style="color: #666;">暂无文档，请先上传</p>';
+            return;
+        }
+        
         let html = '<div style="margin-bottom:15px;display:flex;gap:10px;">';
         html += `<button class="btn btn-small btn-danger" onclick="batchDeleteDocuments()">🗑️ 批量删除</button>`;
         html += `<button class="btn btn-small" onclick="importSession()">📥 导入会话</button>`;
         html += '</div>';
-        html += '<table style="width: 100%; border-collapse: collapse;"><thead><tr style="background: #f1f5f9;">';
-        html += '<th style="padding: 12px; border: 1px solid #e2e8f0;width:40px;"><input type="checkbox" onchange="toggleAllDocs(this)"></th>';
-        html += '<th style="padding: 12px; border: 1px solid #e2e8f0;">文档标题</th><th style="padding: 12px; border: 1px solid #e2e8f0;">Chunk数量</th><th style="padding: 12px; border: 1px solid #e2e8f0;">内容预览</th><th style="padding: 12px; border: 1px solid #e2e8f0;">操作</th></tr></thead><tbody>';
-        documents.forEach(doc => {
-            html += `<tr>
-                <td style="padding: 12px; border: 1px solid #e2e8f0;text-align:center;"><input type="checkbox" class="doc-checkbox" value="${doc.id}"></td>
-                <td style="padding: 12px; border: 1px solid #e2e8f0;">${escapeHtml(doc.title)}</td>
-                <td style="padding: 12px; border: 1px solid #e2e8f0; text-align: center;">${doc.chunk_count}</td>
-                <td style="padding: 12px; border: 1px solid #e2e8f0; color: #64748b; font-size: 13px;">${escapeHtml(doc.content_preview)}...</td>
-                <td style="padding: 12px; border: 1px solid #e2e8f0;">
-                    <button class="btn btn-small" onclick="previewDocument('${doc.id}', '${escapeHtml(doc.title)}')">预览</button>
-                    <button class="btn btn-small" onclick="addDocumentTags('${doc.id}')">🏷️</button>
-                    <button class="btn btn-small btn-danger" onclick="deleteDocument('${doc.id}', '${escapeHtml(doc.title)}')">删除</button>
-                </td>
-            </tr>`;
-        });
-        html += '</tbody></table>';
+        
+        // PageIndex 文档
+        if (piDocs.length > 0) {
+            html += '<h3 style="color:#6366f1;margin:15px 0 10px 0;">📑 PageIndex 文档树</h3>';
+            html += '<table style="width:100%;border-collapse:collapse;margin-bottom:20px;"><thead><tr style="background:#f5f3ff;">';
+            html += '<th style="padding:12px;border:1px solid #e0e7ff;">文档标题</th><th style="padding:12px;border:1px solid #e0e7ff;width:100px;">类型</th><th style="padding:12px;border:1px solid #e0e7ff;width:160px;">操作</th></tr></thead><tbody>';
+            piDocs.forEach(doc => {
+                html += `<tr>
+                    <td style="padding:12px;border:1px solid #e0e7ff;">📄 ${escapeHtml(doc.title)}</td>
+                    <td style="padding:12px;border:1px solid #e0e7ff;text-align:center;"><span style="background:#6366f1;color:white;padding:2px 8px;border-radius:4px;font-size:11px;">PageIndex</span></td>
+                    <td style="padding:12px;border:1px solid #e0e7ff;">
+                        <button class="btn btn-small" onclick="previewPageIndexTree('${doc.id}', '${escapeHtml(doc.title)}')">📂 查看树</button>
+                        <button class="btn btn-small btn-danger" onclick="deletePageIndexDoc('${doc.id}', '${escapeHtml(doc.title)}')">删除</button>
+                    </td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+        }
+        
+        // 普通文档（向量/BM25）
+        if (documents.length > 0) {
+            html += '<h3 style="color:#1e40af;margin:15px 0 10px 0;">📄 文档（向量+BM25）</h3>';
+            html += '<table style="width: 100%; border-collapse: collapse;"><thead><tr style="background: #f1f5f9;">';
+            html += '<th style="padding: 12px; border: 1px solid #e2e8f0;width:40px;"><input type="checkbox" onchange="toggleAllDocs(this)"></th>';
+            html += '<th style="padding: 12px; border: 1px solid #e2e8f0;">文档标题</th><th style="padding: 12px; border: 1px solid #e2e8f0;">Chunk数量</th><th style="padding: 12px; border: 1px solid #e2e8f0;">内容预览</th><th style="padding: 12px; border: 1px solid #e2e8f0;">操作</th></tr></thead><tbody>';
+            documents.forEach(doc => {
+                html += `<tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;text-align:center;"><input type="checkbox" class="doc-checkbox" value="${doc.id}"></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">${escapeHtml(doc.title)}</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0; text-align: center;">${doc.chunk_count}</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0; color: #64748b; font-size: 13px;">${escapeHtml(doc.content_preview)}...</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">
+                        <button class="btn btn-small" onclick="previewDocument('${doc.id}', '${escapeHtml(doc.title)}')">预览</button>
+                        <button class="btn btn-small" onclick="addDocumentTags('${doc.id}')">🏷️</button>
+                        <button class="btn btn-small btn-danger" onclick="deleteDocument('${doc.id}', '${escapeHtml(doc.title)}')">删除</button>
+                    </td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+        }
+        
         listEl.innerHTML = html;
     } catch (e) { listEl.innerHTML = `<div class="error">加载失败: ${e.message}</div>`; }
 }
@@ -94,6 +128,83 @@ async function previewDocument(parentId, title) {
         contentDiv.innerHTML = html;
         modal.style.display = 'block';
     } catch (e) { alert('加载预览失败: ' + e.message); }
+}
+
+async function deletePageIndexDoc(docId, title) {
+    if (!confirm(`确定删除 PageIndex 文档 "${title}"？`)) return;
+    try {
+        const res = await fetch(`${API_BASE}/documents/pageindex/delete/${encodeURIComponent(docId)}`, { method: 'POST' });
+        const data = await res.json();
+        if (data.success) { loadDocuments(); }
+        else { alert('删除失败'); }
+    } catch (e) { alert('删除失败: ' + e.message); }
+}
+
+async function previewPageIndexTree(docId, title) {
+    try {
+        const res = await fetch(`${API_BASE}/documents/pageindex/tree/${encodeURIComponent(docId)}`);
+        const data = await res.json();
+
+        window._pageindexTreeData = data.nodes;
+
+        const modal = document.getElementById('detail-modal');
+        const contentDiv = document.getElementById('detail-content');
+
+        let html = `<h3 style="color:#6366f1;margin-bottom:16px;">📑 ${escapeHtml(title)} (${data.total} 个节点)</h3>`;
+        html += '<div style="max-height:70vh;overflow-y:auto;background:#fafafa;border-radius:8px;padding:16px;">';
+
+        data.nodes.forEach((node, i) => {
+            const level = node.level || 0;
+            const indent = level * 20;
+            const bgColor = level === 0 ? '#f5f3ff' : (level === 1 ? '#faf5ff' : '#fff');
+            const borderColor = level === 0 ? '#e0e7ff' : (level === 1 ? '#e9d5ff' : '#e2e8f0');
+
+            html += `<div style="margin-left:${indent}px;background:${bgColor};border:1px solid ${borderColor};border-radius:6px;padding:10px;margin-bottom:6px;">`;
+            html += `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">`;
+            if (level === 0) html += '<span style="font-size:16px;">📦</span>';
+            else if (level === 1) html += '<span style="font-size:14px;">📂</span>';
+            else html += '<span style="font-size:12px;">📄</span>';
+            html += `<strong style="color:#3730a3;font-size:${Math.max(13, 16 - level)}px;">${escapeHtml(node.title)}</strong>`;
+            html += `<span style="font-size:10px;color:#94a3b8;margin-left:auto;">Lv.${level}</span>`;
+            html += '</div>';
+            if (node.summary) {
+                html += `<div style="font-size:12px;color:#6366f1;font-style:italic;white-space:pre-wrap;padding-left:4px;margin-bottom:4px;">📝 ${escapeHtml(node.summary)}</div>`;
+            }
+            if (node.content) {
+                const contentId = `pi-content-${i}`;
+                const preview = node.content.length > 150 ? node.content.substring(0, 150) + '...' : node.content;
+                html += `<div id="${contentId}" style="font-size:12px;color:#64748b;white-space:pre-wrap;padding-left:4px;">${escapeHtml(preview)}</div>`;
+                if (node.content.length > 150) {
+                    html += `<button onclick="togglePiContent(${i})" style="font-size:11px;color:#6366f1;background:none;border:none;cursor:pointer;padding-left:4px;">展开全文</button>`;
+                }
+            }
+            html += '</div>';
+        });
+
+        html += '</div>';
+        contentDiv.innerHTML = html;
+        modal.style.display = 'block';
+    } catch (e) { alert('加载树失败: ' + e.message); }
+}
+
+function togglePiContent(index) {
+    const nodes = window._pageindexTreeData;
+    if (!nodes || !nodes[index]) return;
+    const el = document.getElementById(`pi-content-${index}`);
+    if (!el) return;
+    const fullContent = nodes[index].content;
+    const preview = fullContent.length > 150 ? fullContent.substring(0, 150) + '...' : fullContent;
+    if (el._expanded) {
+        el.textContent = preview;
+        el._expanded = false;
+        const btn = el.nextElementSibling;
+        if (btn) btn.textContent = '展开全文';
+    } else {
+        el.textContent = fullContent;
+        el._expanded = true;
+        const btn = el.nextElementSibling;
+        if (btn) btn.textContent = '收起';
+    }
 }
 
 function expandChunk(el) {
@@ -145,7 +256,7 @@ async function uploadFile(file) {
         if (data.success) {
             let extra = '';
             if (data.chunk_strategy === 'pageindex') {
-                extra = `<br><a href="#" onclick="showTab('pageindex');return false;" style="color:#6366f1;">📑 查看文档树</a>`;
+                extra = `<br><a href="#" onclick="showTab('pageindex_search');return false;" style="color:#6366f1;">📑 查看文档树</a>`;
             }
             showResult('upload-result', 'success', `${data.message}<br>文档块数: ${data.chunk_count}${extra}`);
         } else showResult('upload-result', 'error', data.error || '上传失败');
@@ -218,6 +329,37 @@ async function vectorSearch() {
         window._vectorResults = data.results;
         document.getElementById('vector-results').innerHTML = `<h3 style="color: #e94560; margin-top: 15px;">向量检索 (${data.total_count}条)</h3>${renderSearchHistory()}${renderPaginatedResults('vector', data.results)}`;
     } catch (e) { showResult('vector-results', 'error', `搜索失败: ${e.message}`); }
+}
+
+async function pageindexSearch() {
+    const query = document.getElementById('pageindex-query').value.trim();
+    const topK = parseInt(document.getElementById('pageindex-top-k').value) || 10;
+    if (!query) { showResult('pageindex-results', 'error', '请输入搜索内容'); return; }
+    showResult('pageindex-results', 'loading', '正在搜索...');
+    try {
+        const res = await fetch(`${API_BASE}/search/pageindex`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({query, top_k: topK}) });
+        const results = await res.json();
+        if (results.length === 0) {
+            showResult('pageindex-results', 'error', '未找到匹配结果');
+            return;
+        }
+        let html = `<h3 style="color: #6366f1; margin-top: 15px;">PageIndex (${results.length}条)</h3>`;
+        html += '<div style="display:grid;gap:10px;margin-top:10px;">';
+        results.forEach((r, i) => {
+            html += `<div style="background:#f5f3ff;border:1px solid #e0e7ff;border-radius:8px;padding:12px;">
+                <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;">
+                    <span style="background:#6366f1;color:white;padding:2px 8px;border-radius:4px;font-size:11px;">${i+1}</span>
+                    <strong style="font-size:14px;color:#3730a3;">${escapeHtml(r.title)}</strong>
+                    <span style="font-size:11px;color:#94a3b8;margin-left:auto;">📄 ${escapeHtml(r.doc_title)}</span>
+                </div>
+                <div style="font-size:12px;color:#64748b;margin-bottom:4px;">路径: ${escapeHtml(r.path)}</div>
+                ${r.summary ? `<div style="font-size:12px;color:#6366f1;font-style:italic;margin-bottom:4px;">📝 ${escapeHtml(r.summary)}</div>` : ''}
+                <div style="font-size:13px;color:#334155;white-space:pre-wrap;">${escapeHtml(r.content)}</div>
+            </div>`;
+        });
+        html += '</div>';
+        document.getElementById('pageindex-results').innerHTML = html;
+    } catch (e) { showResult('pageindex-results', 'error', `搜索失败: ${e.message}`); }
 }
 
 async function compareSearch() {
@@ -1679,6 +1821,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('bm25-query').addEventListener('keypress', (e) => { if (e.key === 'Enter') bm25Search(); });
     document.getElementById('vector-query').addEventListener('keypress', (e) => { if (e.key === 'Enter') vectorSearch(); });
     document.getElementById('compare-query').addEventListener('keypress', (e) => { if (e.key === 'Enter') compareSearch(); });
+    document.getElementById('pageindex-query').addEventListener('keypress', (e) => { if (e.key === 'Enter') pageindexSearch(); });
     
     fetchStats();
     
