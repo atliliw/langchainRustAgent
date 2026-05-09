@@ -49,9 +49,20 @@ pub struct AgentEngine;
 
 impl AgentEngine {
     /// ── 规划 ──
-    pub async fn plan(config: &Config, task: String, rag_context: String, use_rag: bool) -> Result<AgentPlan, GraphDemoError> {
+    pub async fn plan(config: &Config, task: String, rag_context: String, use_rag: bool, use_routing: bool) -> Result<AgentPlan, GraphDemoError> {
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
         let tj = AVAILABLE_TOOLS.iter().map(|(n,d)| format!("{{\"name\":\"{}\",\"description\":\"{}\"}}",n,d)).collect::<Vec<_>>().join(",");
+
+        let routing_instructions = if use_routing {
+            "\n决策节点说明：\n\
+             如果某些步骤需要根据中间结果判断下一步走向，可以创建 type=decision 的节点。\n\
+             决策节点不分配 tool，通过 routes 字段定义不同走向。\n\
+             routes 的 key 是决策结果，value 是对应的后续任务名。\n\
+             示例：判断信息是否充分 → routes: {\"充分\":\"写报告\", \"不充分\":\"补充搜索\"}\n"
+        } else {
+            "\n所有任务的 type 默认为 normal，按 depends_on 顺序执行。\n"
+        };
+
         let p = if use_rag {
             let rag_context_block = if rag_context.is_empty() {
                 String::new()
@@ -60,7 +71,7 @@ impl AgentEngine {
             };
             format!(
                 "第一个子任务必须是「知识库检索」，使用 rag_search 工具。后续子任务基于知识库检索的结果执行。{rag}\n\
-                 将任务拆解为2-5个子任务并分配工具。\n\
+                 将任务拆解为2-5个子任务并分配工具。{routing}\
                  要求：\n\
                  1. 对比类任务（如比较A和B）必须将A和B拆成独立的搜索/调研子任务，depends_on 为空，以便并行执行\n\
                  2. 每个子任务职责单一，不要合并多个不同的工作\n\
@@ -68,14 +79,14 @@ impl AgentEngine {
                  示例：用户说\"比较go和python\"，应该拆成：\n\
                    [{{\"name\":\"调研Go\", \"depends_on\":[]}}, {{\"name\":\"调研Python\", \"depends_on\":[]}}, {{\"name\":\"对比分析\", \"depends_on\":[\"调研Go\",\"调研Python\"]}}]\n\
                  可用工具：[{tools}]\n\
-                 返回JSON格式：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
+                 返回JSON格式：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"task_type\": \"normal\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
                  任务：{task}\n\
                  只返回JSON。name和description必须用中文。",
-                rag = rag_context_block, tools = tj, task = task
+                rag = rag_context_block, routing = routing_instructions, tools = tj, task = task
             )
         } else {
             format!(
-                "将任务拆解为2-5个子任务并分配工具。\n\
+                "将任务拆解为2-5个子任务并分配工具。{routing}\
                  要求：\n\
                  1. 对比类任务（如比较A和B）必须将A和B拆成独立的搜索/调研子任务，depends_on 为空，以便并行执行\n\
                  2. 每个子任务职责单一，不要合并多个不同的工作\n\
@@ -83,10 +94,10 @@ impl AgentEngine {
                  示例：用户说\"比较go和python\"，应该拆成：\n\
                    [{{\"name\":\"调研Go\", \"depends_on\":[]}}, {{\"name\":\"调研Python\", \"depends_on\":[]}}, {{\"name\":\"对比分析\", \"depends_on\":[\"调研Go\",\"调研Python\"]}}]\n\
                  可用工具：[{tools}]\n\
-                 返回JSON格式：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
+                 返回JSON格式：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"task_type\": \"normal\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
                  任务：{task}\n\
                  只返回JSON。name和description必须用中文。",
-                tools = tj, task = task
+                routing = routing_instructions, tools = tj, task = task
             )
         };
         let r = llm.invoke(vec![Message::human(&p)], None).await.map_err(|e| GraphDemoError::ExecutionError(e.to_string()))?;
@@ -175,7 +186,26 @@ impl AgentEngine {
                         config.to_langchain_openai_config().with_max_tokens(2048)
                     );
 
-                    let (output, tokens) = match at.tool.as_str() {
+                    let (output, tokens) = match at.task_type.as_str() {
+                        // 决策节点：调 LLM 判断，不执行具体任务
+                        "decision" => {
+                            let ctx_str = if ctx.is_empty() { "无前置结果".to_string() } else {
+                                format!("前置完成的任务结果：\n{}", ctx)
+                            };
+                            let route_options: Vec<String> = at.routes.keys().map(|k| format!("「{}」", k)).collect();
+                            let p = format!(
+                                "基于以下信息做出判断，只返回决策结果（{}），不要多余内容。\n\n{}\n\n当前决策：{}",
+                                route_options.join(" 或 "), ctx_str, at.description
+                            );
+                            match llm.invoke(vec![Message::human(&p)], None).await {
+                                Ok(r) => {
+                                    let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
+                                    (r.content.clone(), t)
+                                }
+                                Err(e) => ("判断失败".to_string(), 0),
+                            }
+                        }
+                        _ => match at.tool.as_str() {
                         "llm_query" | "" => {
                             let p = if ctx.is_empty() {
                                 format!("任务：{}\n当前子任务：{}\n\n请执行当前子任务并输出结果。{}",
@@ -272,7 +302,8 @@ impl AgentEngine {
                                 Err(e) => (format!("执行失败: {}", e), 0),
                             }
                         }
-                    };
+                    }
+                };
 
                     let elapsed = task_start.elapsed().as_millis() as u64;
                     let mut new_state = state.clone();
@@ -416,6 +447,45 @@ impl AgentEngine {
         Ok((results, has_more))
     }
 
+    /// 从决策节点的输出中解析出选中的路由 key
+    fn parse_decision(output: &str) -> Option<String> {
+        let lower = output.to_lowercase();
+        // 支持多种输出格式
+        for keyword in &["通过", "充分", "enough", "yes", "tech", "general", "不通过", "不充分", "not enough", "no", "other"] {
+            if lower.contains(keyword) {
+                return Some(match *keyword {
+                    "通过" | "充分" | "enough" | "yes" => "通过".to_string(),
+                    "不通过" | "不充分" | "not enough" | "no" => "不通过".to_string(),
+                    "tech" => "tech".to_string(),
+                    "general" => "general".to_string(),
+                    "other" => "other".to_string(),
+                    _ => keyword.to_string(),
+                });
+            }
+        }
+        None
+    }
+
+    /// 把指定任务及其所有下游任务标记为"跳过"（加入 done）
+    fn skip_downstream(tasks: &[AgentTask], start: &str, done: &mut HashSet<String>, results: &mut Vec<AgentExecResult>) {
+        if done.contains(start) { return; }
+        done.insert(start.to_string());
+        results.push(AgentExecResult {
+            task_name: start.to_string(),
+            tool: String::new(),
+            input_summary: String::new(),
+            output: "⏭️ 已跳过（决策未选中该路径）".to_string(),
+            duration_ms: 0,
+            tokens: 0,
+        });
+        // 递归标记下游
+        for task in tasks {
+            if task.depends_on.contains(&start.to_string()) {
+                Self::skip_downstream(tasks, &task.name, done, results);
+            }
+        }
+    }
+
     /// ── 按依赖分批并行执行：同批任务 invoke_parallel 并行，不同批串行 ──
     /// 例: A → [B, C] → D  => 第一批: A, 第二批: B+C(并行), 第三批: D
     pub async fn execute_all_batches(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>) -> Result<AgentExecResponse, GraphDemoError> {
@@ -435,6 +505,20 @@ impl AgentEngine {
             for r in &results {
                 done.insert(r.task_name.clone());
                 all_results.push(r.clone());
+
+                // 决策节点：根据 LLM 的决策结果跳过未选中的后续任务
+                if let Some(decided) = Self::parse_decision(&r.output) {
+                    // 找到这个决策任务对应的 AgentTask
+                    if let Some(task_def) = agent_tasks.iter().find(|t| t.name == r.task_name) {
+                        // 遍历 routes，把非选中的分支对应的后续任务标记为已完成（跳过）
+                        for (route_key, next_task) in &task_def.routes {
+                            if route_key != &decided {
+                                // 找到这个 next_task 及其所有下游任务，标记为跳过
+                                Self::skip_downstream(&agent_tasks, next_task, &mut done, &mut all_results);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -470,7 +554,7 @@ impl AgentEngine {
 
     /// ── 兼容旧接口（一次性跑完所有批次） ──
     pub async fn plan_and_execute(config: &Config, task: String) -> Result<AgentExecResponse, GraphDemoError> {
-        let plan = Self::plan(config, task.clone(), String::new(), false).await?;
+        let plan = Self::plan(config, task.clone(), String::new(), false, false).await?;
         let (sid, mut all, _) = Self::execute_batch_start(config, task, plan.tasks, String::new(), None).await?;
         loop {
             let (batch, has_more) = Self::execute_batch_next(config, &sid, None).await?;
@@ -489,7 +573,7 @@ mod tests {
         AgentTask {
             name: name.to_string(), description: String::new(),
             tool: "llm_query".into(), depends_on: deps.into_iter().map(|s| s.to_string()).collect(),
-            input_template: String::new(),
+            input_template: String::new(), task_type: "normal".into(), routes: std::collections::HashMap::new(),
         }
     }
 

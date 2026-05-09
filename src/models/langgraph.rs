@@ -153,9 +153,21 @@ pub struct ToolParam {
 pub struct AgentTask {
     pub name: String,
     pub description: String,
+    #[serde(default)]
     pub tool: String,
     pub depends_on: Vec<String>,
+    #[serde(default)]
     pub input_template: String,
+    /// 任务类型: normal(默认) / decision(决策节点)
+    #[serde(default = "default_task_type")]
+    pub task_type: String,
+    /// 决策节点的路由表: {"充分":"写报告", "不充分":"补充搜索"}
+    #[serde(default)]
+    pub routes: std::collections::HashMap<String, String>,
+}
+
+fn default_task_type() -> String {
+    "normal".to_string()
 }
 
 /// Agent 规划结果

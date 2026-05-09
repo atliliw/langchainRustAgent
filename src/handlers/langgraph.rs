@@ -144,7 +144,8 @@ pub async fn agent_plan(
 ) -> Result<Json<AgentPlan>, ApiErrorResponse> {
     let task = request["task"].as_str().unwrap_or("").to_string();
     let use_rag = request["use_rag"].as_bool().unwrap_or(false);
-    let result = state.api.agent_plan(task, use_rag).await?;
+    let use_routing = request["use_routing"].as_bool().unwrap_or(false);
+    let result = state.api.agent_plan(task, use_rag, use_routing).await?;
     Ok(Json(result))
 }
 
