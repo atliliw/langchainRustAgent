@@ -7,6 +7,7 @@ use langchainrust::langgraph::{
     StateGraph, StateUpdate, START, END,
 };
 use langchainrust::{language_models::OpenAIChat, schema::Message, core::runnables::Runnable};
+use sqlx::SqlitePool;
 use std::collections::{HashSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -33,6 +34,65 @@ fn estimate_token_usage(prompt: &str, response: &str) -> usize {
     input_tokens + output_tokens
 }
 
+// ── SQLite 持久化辅助 ──
+async fn ensure_agent_tables(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS agent_sessions (
+            session_id TEXT PRIMARY KEY,
+            task TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            status TEXT NOT NULL DEFAULT 'running'
+        )"
+    ).execute(pool).await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS agent_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            task_name TEXT NOT NULL,
+            tool TEXT NOT NULL DEFAULT '',
+            output TEXT NOT NULL DEFAULT '',
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            tokens INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id)
+        )"
+    ).execute(pool).await?;
+
+    Ok(())
+}
+
+async fn save_agent_session(pool: &SqlitePool, session_id: &str, task: &str) {
+    let _ = sqlx::query(
+        "INSERT OR IGNORE INTO agent_sessions (session_id, task, status) VALUES (?, ?, 'running')"
+    )
+    .bind(session_id)
+    .bind(task)
+    .execute(pool)
+    .await;
+}
+
+async fn save_agent_result(pool: &SqlitePool, session_id: &str, r: &AgentExecResult) {
+    let _ = sqlx::query(
+        "INSERT INTO agent_results (session_id, task_name, tool, output, duration_ms, tokens) VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    .bind(session_id)
+    .bind(&r.task_name)
+    .bind(&r.tool)
+    .bind(&r.output)
+    .bind(r.duration_ms as i64)
+    .bind(r.tokens as i64)
+    .execute(pool)
+    .await;
+}
+
+async fn update_agent_session_status(pool: &SqlitePool, session_id: &str, status: &str) {
+    let _ = sqlx::query("UPDATE agent_sessions SET status = ? WHERE session_id = ?")
+        .bind(status)
+        .bind(session_id)
+        .execute(pool)
+        .await;
+}
+
 // ── 状态存储（保留 session 管理） ──
 struct BatchState {
     task: String,
@@ -41,17 +101,115 @@ struct BatchState {
     completed_names: HashSet<String>,
     start: Instant,
     rag_context: String,
+    review_pending: Vec<AgentTask>,
 }
 static STORE: Mutex<Option<HashMap<String, BatchState>>> = Mutex::new(None);
 fn store() -> &'static Mutex<Option<HashMap<String, BatchState>>> { &STORE }
 
+/// 尝试修复常见 JSON 格式错误
+fn fix_json(input: &str) -> String {
+    let s = input.trim().to_string();
+
+    // 1. 移除 BOM
+    let s = if s.starts_with('\u{feff}') { s[3..].to_string() } else { s };
+
+    // 2. 提取 JSON 边界（跳过前导/后续文本）
+    let s = {
+        let start = s.find(|c| c == '[' || c == '{');
+        let end = s.rfind(|c| c == ']' || c == '}');
+        match (start, end) {
+            (Some(si), Some(ei)) if si <= ei => s[si..=ei].to_string(),
+            _ => return s,
+        }
+    };
+
+    // 3. 修复 JSON 常见问题
+    let mut fixed = s.clone();
+
+    // 3a. 移除尾随逗号：",]" -> "]" 和 ",}" -> "}"
+    loop {
+        let before = fixed.clone();
+        fixed = fixed.replace(",]", "]").replace(",}", "}");
+        if fixed == before { break; }
+    }
+
+    // 3b. 替换单引号为双引号（但不在字符串值内部简单替换）
+    // 简单方法：替换键周围的单引号
+    let mut chars: Vec<char> = fixed.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\'' {
+            // 检查是否可能是键：前后有 {, , : 等
+            let prev_char = if i > 0 { chars[i-1] } else { '{' };
+            let next_char = if i + 1 < chars.len() { chars[i+1] } else { '}' };
+            if matches!(prev_char, '{' | ',' | ':') || matches!(next_char, ':' | ',' | '}' | ']') {
+                chars[i] = '"';
+            }
+        }
+        i += 1;
+    }
+    fixed = chars.into_iter().collect();
+
+    // 3c. 尝试给未加引号的属性名加引号
+    // 匹配模式 {word: 或 ,word: 其中 word 是字母数字
+    let mut result = String::new();
+    let c2: Vec<char> = fixed.chars().collect();
+    let mut j = 0;
+    while j < c2.len() {
+        // 检查当前位置是否可能是一个未加引号的键的开始
+        if (j == 0 || c2[j-1] == '{' || c2[j-1] == ',') && c2[j].is_ascii_alphabetic() {
+            // 找到键名结束位置
+            let mut k = j;
+            while k < c2.len() && (c2[k].is_alphanumeric() || c2[k] == '_') {
+                k += 1;
+            }
+            // 如果后面跟着 :，说明是未加引号的键
+            if k < c2.len() && c2[k] == ':' {
+                result.push('"');
+                result.extend(&c2[j..k]);
+                result.push('"');
+                j = k;
+                continue;
+            }
+        }
+        result.push(c2[j]);
+        j += 1;
+    }
+    fixed = result;
+
+    fixed
+}
+
 pub struct AgentEngine;
 
 impl AgentEngine {
+    fn parse_tasks(s: &str) -> Result<Vec<AgentTask>, String> {
+        serde_json::from_str::<Vec<AgentTask>>(s)
+            .map_err(|e| format!("JSON 格式错误 ({}): \n{}", e, s.chars().take(200).collect::<String>()))
+    }
+
     /// ── 规划 ──
     pub async fn plan(config: &Config, task: String, rag_context: String, use_rag: bool, use_routing: bool) -> Result<AgentPlan, GraphDemoError> {
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
         let tj = AVAILABLE_TOOLS.iter().map(|(n,d)| format!("{{\"name\":\"{}\",\"description\":\"{}\"}}",n,d)).collect::<Vec<_>>().join(",");
+
+        let routing_section = if use_routing {
+            "注意：如果任务需要根据中间结果决定下一步，必须创建 type=decision 的决策节点。\n\
+             决策节点不需要 tool，通过 routes 定义走向（key=结果, value=下一个任务）。\n\
+             routes 中的所有 value 必须在同一个任务列表中创建对应的子任务，每个子任务用 depends_on 指向决策节点。\n\
+             如果任务需要人工审批才能继续，创建 type=human_review 的审核节点。\n\
+             示例：调研Go和Python后，需要判断信息是否充分：\n\
+                [\n\
+                  {\"name\":\"调研Go\",\"tool\":\"rag_search\",\"depends_on\":[],\"task_type\":\"normal\",\"input_template\":\"\"},\n\
+                  {\"name\":\"调研Python\",\"tool\":\"rag_search\",\"depends_on\":[],\"task_type\":\"normal\",\"input_template\":\"\"},\n\
+                  {\"name\":\"判断信息是否充分\",\"task_type\":\"decision\",\"depends_on\":[\"调研Go\",\"调研Python\"],\"routes\":{\"充分\":\"写对比\",\"不充分\":\"补充搜索\"},\"input_template\":\"\"},\n\
+                  {\"name\":\"补充搜索\",\"tool\":\"web_search\",\"depends_on\":[\"判断信息是否充分\"],\"task_type\":\"normal\",\"input_template\":\"\"},\n\
+                  {\"name\":\"写对比\",\"tool\":\"llm_query\",\"depends_on\":[\"判断信息是否充分\"],\"task_type\":\"normal\",\"input_template\":\"\"}\n\
+                ]\n"
+        } else {
+            ""
+        };
+
         let p = if use_rag {
             let rag_context_block = if rag_context.is_empty() {
                 String::new()
@@ -61,102 +219,60 @@ impl AgentEngine {
             format!(
                 "第一个子任务必须是「知识库检索」，使用 rag_search 工具。后续子任务基于知识库检索的结果执行。{rag}\n\
                  将任务拆解为2-5个子任务并分配工具。\n\
+                 {routing}\
                  要求：对比类任务必须将A和B拆成独立的搜索任务（depends_on为空），最终汇总任务depends_on所有搜索任务。\n\
                  可用工具：[{tools}]\n\
-                 返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
+                 返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"task_type\": \"normal\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
                  任务：{task}\n\
                  只返回JSON。",
-                rag = rag_context_block, tools = tj, task = task
+                rag = rag_context_block, routing = routing_section, tools = tj, task = task
             )
         } else {
             format!(
                 "将任务拆解为2-5个子任务并分配工具。\n\
+                 {routing}\
                  要求：对比类任务必须将A和B拆成独立的搜索任务（depends_on为空），最终汇总任务depends_on所有搜索任务。\n\
                  可用工具：[{tools}]\n\
-                 返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
+                 返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"task_type\": \"normal\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
                  任务：{task}\n\
                  只返回JSON。",
-                tools = tj, task = task
+                routing = routing_section, tools = tj, task = task
             )
         };
         let r = llm.invoke(vec![Message::human(&p)], None).await.map_err(|e| GraphDemoError::ExecutionError(e.to_string()))?;
         let c = r.content.trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
-        let mut tasks: Vec<AgentTask> = serde_json::from_str(c).map_err(|e| GraphDemoError::BuildError(format!("格式错: {}", e)))?;
+
+        let tasks = match Self::parse_tasks(c) {
+            Ok(t) => t,
+            Err(first_err) => {
+                let fixed = fix_json(c);
+                match Self::parse_tasks(&fixed) {
+                    Ok(t) => t,
+                    Err(_) => {
+                        tracing::warn!("JSON 格式错误，尝试让 LLM 修正: {}", first_err);
+                        let fix_prompt = format!(
+                            "JSON 格式错误：{}\n\n原始内容：\n```\n{}\n```\n\n请修正为合法 JSON，只返回修正后的 JSON。",
+                            first_err, c
+                        );
+                        match llm.invoke(vec![Message::human(&fix_prompt)], None).await {
+                            Ok(fix_r) => {
+                                let fixed_c = fix_r.content.trim_start_matches("```json")
+                                    .trim_start_matches("```").trim_end_matches("```").trim();
+                                let fixed2 = fix_json(fixed_c);
+                                Self::parse_tasks(&fixed2).map_err(|e| {
+                                    GraphDemoError::BuildError(format!("LLM 修正后 JSON 仍无效: {}", e))
+                                })?
+                            }
+                            Err(e) => return Err(GraphDemoError::BuildError(format!("LLM 修正失败: {}", e))),
+                        }
+                    }
+                }
+            }
+        };
+
         if tasks.is_empty() { return Err(GraphDemoError::BuildError("规划为空".into())); }
-
-        // 如果启用路由，自动插入决策节点
-        if use_routing {
-            Self::inject_decision_nodes(&mut tasks);
-        }
-
         let gs = Self::build_graph(&tasks);
         Ok(AgentPlan{original_task:task, tasks, graph_structure:gs})
-    }
-
-    /// 自动在调研任务和汇总任务之间插入决策节点
-    fn inject_decision_nodes(tasks: &mut Vec<AgentTask>) {
-        let research_tools = ["rag_search", "web_search"];
-        // 找出所有调研任务名
-        let research_names: HashSet<String> = tasks.iter()
-            .filter(|t| research_tools.contains(&t.tool.as_str()))
-            .map(|t| t.name.clone())
-            .collect();
-
-        // 找出直接依赖调研任务的汇总任务
-        let synthesis_indices: Vec<usize> = tasks.iter().enumerate()
-            .filter(|(_, t)| {
-                t.tool == "llm_query" && t.depends_on.iter().any(|d| research_names.contains(d))
-            })
-            .map(|(i, _)| i)
-            .collect();
-
-        // 从后往前插入决策节点（避免索引偏移）
-        for &idx in synthesis_indices.iter().rev() {
-            let synth = &tasks[idx];
-            let deps_on_research: Vec<String> = synth.depends_on.iter()
-                .filter(|d| research_names.contains(d.as_str()))
-                .cloned()
-                .collect();
-
-            let decision_name = format!("判断信息是否充分");
-            let decision = AgentTask {
-                name: decision_name.clone(),
-                description: "基于检索结果判断信息是否满足要求，决定下一步走向".to_string(),
-                tool: String::new(),
-                depends_on: deps_on_research.clone(),
-                input_template: String::new(),
-                task_type: "decision".to_string(),
-                routes: HashMap::from([
-                    ("充分".to_string(), synth.name.clone()),
-                    ("不充分".to_string(), format!("补充搜索")),
-                ]),
-            };
-
-            // 更新汇总任务的依赖：改为依赖决策节点
-            let task = &mut tasks[idx];
-            for d in &deps_on_research {
-                task.depends_on.retain(|x| x != d);
-            }
-            task.depends_on.push(decision_name.clone());
-
-            // 插入补充搜索任务（如果还不存在）
-            let has_supplement = tasks.iter().any(|t| t.name == "补充搜索");
-            if !has_supplement {
-                let supplement = AgentTask {
-                    name: "补充搜索".to_string(),
-                    description: "补充搜索更多信息".to_string(),
-                    tool: "web_search".to_string(),
-                    depends_on: vec![],
-                    input_template: String::new(),
-                    task_type: "normal".to_string(),
-                    routes: HashMap::new(),
-                };
-                tasks.push(supplement);
-            }
-
-            // 插入决策节点
-            tasks.insert(idx, decision);
-        }
     }
 
     fn build_graph(tasks: &[AgentTask]) -> serde_json::Value {
@@ -232,143 +348,275 @@ impl AgentEngine {
                 let vector_store = vector_store.clone();
 
                 async move {
-                    let task_start = Instant::now();
-                    let llm = OpenAIChat::new(
-                        config.to_langchain_openai_config().with_max_tokens(2048)
-                    );
+                    let task_name = at.name.clone();
+                    let tool_name = at.tool.clone();
+                    let input_template = at.input_template.clone();
+                    tracing::info!(task_name = %task_name, tool = %tool_name, "任务开始执行");
 
-                    let (output, tokens) = match at.task_type.as_str() {
-                        // 决策节点：调 LLM 判断，不执行具体任务
-                        "decision" => {
-                            let ctx_str = if ctx.is_empty() { "无前置结果".to_string() } else {
-                                format!("前置完成的任务结果：\n{}", ctx)
-                            };
-                            let route_options: Vec<String> = at.routes.keys().map(|k| format!("「{}」", k)).collect();
-                            let p = format!(
-                                "基于以下信息做出判断，只返回决策结果（{}），不要多余内容。\n\n{}\n\n当前决策：{}",
-                                route_options.join(" 或 "), ctx_str, at.description
-                            );
-                            match llm.invoke(vec![Message::human(&p)], None).await {
-                                Ok(r) => {
-                                    let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
-                                    (r.content.clone(), t)
+                    let task_start = Instant::now();
+
+                    let handle = tokio::spawn(async move {
+                        let llm = OpenAIChat::new(
+                            config.to_langchain_openai_config().with_max_tokens(2048)
+                        );
+
+                        let (output, tokens) = match at.task_type.as_str() {
+                            "human_review" => {
+                                (format!("⏸️ 待人工审批：{}", at.description), 0)
+                            }
+                            // 决策节点：调 LLM 判断，不执行具体任务
+                            "decision" => {
+                                let ctx_str = if ctx.is_empty() { "无前置结果".to_string() } else {
+                                    format!("前置完成的任务结果：\n{}", ctx)
+                                };
+                                let route_options: Vec<String> = at.routes.keys().map(|k| format!("「{}」", k)).collect();
+                                let p = format!(
+                                    "基于以下信息做出判断，只返回决策结果（{}），不要多余内容。\n\n{}\n\n当前决策：{}",
+                                    route_options.join(" 或 "), ctx_str, at.description
+                                );
+                                match llm.invoke(vec![Message::human(&p)], None).await {
+                                    Ok(r) => {
+                                        let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
+                                        (r.content.clone(), t)
+                                    }
+                                    Err(e) => ("判断失败".to_string(), 0),
                                 }
-                                Err(e) => ("判断失败".to_string(), 0),
                             }
-                        }
-                        _ => match at.tool.as_str() {
-                        "llm_query" | "" => {
-                            let p = if ctx.is_empty() {
-                                format!("任务：{}\n当前子任务：{}\n\n请执行当前子任务并输出结果。{}",
-                                    task, at.description, rag)
-                            } else {
-                                format!("任务：{}\n当前子任务：{}\n\n前置完成的任务结果：\n{}\n\n请基于前置结果执行当前子任务并输出。{}",
-                                    task, at.description, ctx, rag)
-                            };
-                            match tokio::time::timeout(Duration::from_secs(120),
-                                llm.invoke(vec![Message::human(&p)], None)
-                            ).await {
-                                Ok(Ok(r)) => {
-                                    let t = r.token_usage.as_ref()
-                                        .map(|u| u.total_tokens)
-                                        .unwrap_or_else(|| estimate_token_usage(&p, &r.content));
-                                    (r.content.clone(), t)
-                                }
-                                _ => ("执行失败".to_string(), 0),
-                            }
-                        }
-                        "web_search" => {
-                            let p = format!("任务：{}\n当前子任务：{}\n\n请基于你的知识回答。{}",
-                                task, at.description, rag);
-                            match llm.invoke(vec![Message::human(&p)], None).await {
-                                Ok(r) => {
-                                    let t = r.token_usage.as_ref()
-                                        .map(|u| u.total_tokens)
-                                        .unwrap_or_else(|| estimate_token_usage(&p, &r.content));
-                                    (r.content.clone(), t)
-                                }
-                                Err(e) => (format!("执行失败: {}", e), 0),
-                            }
-                        }
-                        "weather" => {
-                            let city_prompt = format!("任务：{}\n当前子任务：{}\n\n请输出要查询天气的城市名，不要多余内容。",
-                                task, at.description);
-                            let city = llm.invoke(vec![Message::human(&city_prompt)], None).await
-                                .map(|r| r.content.trim().to_string())
-                                .unwrap_or_else(|_| at.description.clone());
-                            match query_weather(&city).await {
-                                Ok(r) => (format!("{}的天气：{}", city, r), 0),
-                                Err(e) => (format!("天气查询失败: {}", e), 0),
-                            }
-                        }
-                        "rag_search" => {
-                            // 用任务名独立搜索向量库
-                            let query = if at.input_template.is_empty() {
-                                at.name.clone()
-                            } else {
-                                at.input_template.clone()
-                            };
-                            match &vector_store {
-                                Some(store) => {
-                                    match store.search_rag(&query, 3).await {
-                                        Ok(results) => {
-                                            let filtered: Vec<_> = results.iter()
-                                                .filter(|r| r.score >= 0.3)
-                                                .collect();
-                                            if filtered.is_empty() {
-                                                (format!("知识库中未找到相关文档（搜索词：{}）", query), 0)
-                                            } else {
-                                                let content: Vec<String> = filtered.iter().map(|r| {
-                                                    format!("[相关性 {:.1}%]\n{}", r.score * 100.0, r.document.content)
-                                                }).collect();
-                                                let embed_tokens = query.chars().count().max(1);
-                                                (format!("知识库检索到以下相关信息（搜索词：{}，Embedding 消耗 ~{} tokens）：\n\n{}",
-                                                    query, embed_tokens, content.join("\n\n---\n\n")), embed_tokens)
+                            _ => match at.tool.as_str() {
+                            "llm_query" | "" => {
+                                let p = if ctx.is_empty() {
+                                    format!("任务：{}\n当前子任务：{}\n\n请执行当前子任务并输出结果。{}",
+                                        task, at.description, rag)
+                                } else {
+                                    format!("任务：{}\n当前子任务：{}\n\n前置完成的任务结果：\n{}\n\n请基于前置结果执行当前子任务并输出。{}",
+                                        task, at.description, ctx, rag)
+                                };
+                                let mut last_error = String::new();
+                                let mut result = None;
+                                for attempt in 1..=3 {
+                                    match tokio::time::timeout(Duration::from_secs(120),
+                                        llm.invoke(vec![Message::human(&p)], None)
+                                    ).await {
+                                        Ok(Ok(r)) => {
+                                            let t = r.token_usage.as_ref()
+                                                .map(|u| u.total_tokens)
+                                                .unwrap_or_else(|| estimate_token_usage(&p, &r.content));
+                                            result = Some((r.content.clone(), t));
+                                            break;
+                                        }
+                                        Ok(Err(e)) => {
+                                            last_error = e.to_string();
+                                            tracing::warn!("llm_query attempt {}/3 failed: {}", attempt, last_error);
+                                            if attempt < 3 {
+                                                tokio::time::sleep(std::time::Duration::from_secs([1, 3, 5][attempt - 1])).await;
                                             }
                                         }
-                                        Err(_) => (format!("知识库搜索失败（搜索词：{}）", query), 0),
+                                        Err(_) => {
+                                            last_error = "timeout".to_string();
+                                            tracing::warn!("llm_query attempt {}/3 timeout", attempt);
+                                            if attempt < 3 {
+                                                tokio::time::sleep(std::time::Duration::from_secs([1, 3, 5][attempt - 1])).await;
+                                            }
+                                        }
                                     }
                                 }
-                                None => {
-                                    // 没有向量库时回退到共享的 rag 参数
-                                    if rag.is_empty() {
-                                        ("知识库中未找到相关文档".to_string(), 0)
-                                    } else {
-                                        (format!("知识库检索到以下相关信息：\n\n{}", rag), 0)
+                                match result {
+                                    Some(r) => r,
+                                    None => (format!("执行失败(重试3次后): {}", last_error), 0),
+                                }
+                            }
+                            "web_search" => {
+                                let p = format!("任务：{}\n当前子任务：{}\n\n请基于你的知识回答。{}",
+                                    task, at.description, rag);
+                                let mut last_error = String::new();
+                                let mut result = None;
+                                for attempt in 1..=3 {
+                                    match tokio::time::timeout(Duration::from_secs(60),
+                                        llm.invoke(vec![Message::human(&p)], None)
+                                    ).await {
+                                        Ok(Ok(r)) => {
+                                            let t = r.token_usage.as_ref()
+                                                .map(|u| u.total_tokens)
+                                                .unwrap_or_else(|| estimate_token_usage(&p, &r.content));
+                                            result = Some((r.content.clone(), t));
+                                            break;
+                                        }
+                                        Ok(Err(e)) => {
+                                            last_error = e.to_string();
+                                            tracing::warn!("web_search attempt {}/3 failed: {}", attempt, last_error);
+                                            if attempt < 3 {
+                                                tokio::time::sleep(std::time::Duration::from_secs([1, 3, 5][attempt - 1])).await;
+                                            }
+                                        }
+                                        Err(_) => {
+                                            last_error = "timeout".to_string();
+                                            tracing::warn!("web_search attempt {}/3 timeout", attempt);
+                                            if attempt < 3 {
+                                                tokio::time::sleep(std::time::Duration::from_secs([1, 3, 5][attempt - 1])).await;
+                                            }
+                                        }
                                     }
+                                }
+                                match result {
+                                    Some(r) => r,
+                                    None => (format!("执行失败(重试3次后): {}", last_error), 0),
+                                }
+                            }
+                            "weather" => {
+                                let city_prompt = format!("任务：{}\n当前子任务：{}\n\n请输出要查询天气的城市名，不要多余内容。",
+                                    task, at.description);
+                                let mut last_error = String::new();
+                                let mut city_result = None;
+                                for attempt in 1..=2 {
+                                    match tokio::time::timeout(Duration::from_secs(15),
+                                        llm.invoke(vec![Message::human(&city_prompt)], None)
+                                    ).await {
+                                        Ok(Ok(r)) => {
+                                            city_result = Some(r.content.trim().to_string());
+                                            break;
+                                        }
+                                        Ok(Err(e)) => {
+                                            last_error = e.to_string();
+                                            tracing::warn!("weather city extraction attempt {}/2 failed: {}", attempt, last_error);
+                                            if attempt < 2 {
+                                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                            }
+                                        }
+                                        Err(_) => {
+                                            last_error = "timeout".to_string();
+                                            tracing::warn!("weather city extraction attempt {}/2 timeout", attempt);
+                                            if attempt < 2 {
+                                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                            }
+                                        }
+                                    }
+                                }
+                                let city = match city_result {
+                                    Some(c) => c,
+                                    None => at.description.clone(),
+                                };
+                                match query_weather(&city).await {
+                                    Ok(r) => (format!("{}的天气：{}", city, r), 0),
+                                    Err(e) => (format!("天气查询失败: {}", e), 0),
+                                }
+                            }
+                            "rag_search" => {
+                                // 用任务名独立搜索向量库
+                                let query = if at.input_template.is_empty() {
+                                    at.name.clone()
+                                } else {
+                                    at.input_template.clone()
+                                };
+                                match &vector_store {
+                                    Some(store) => {
+                                        match tokio::time::timeout(Duration::from_secs(30), store.search_rag(&query, 3)).await {
+                                            Ok(Ok(results)) => {
+                                                let filtered: Vec<_> = results.iter()
+                                                    .filter(|r| r.score >= 0.3)
+                                                    .collect();
+                                                if filtered.is_empty() {
+                                                    (format!("知识库中未找到相关文档（搜索词：{}）", query), 0)
+                                                } else {
+                                                    let content: Vec<String> = filtered.iter().map(|r| {
+                                                        format!("[相关性 {:.1}%]\n{}", r.score * 100.0, r.document.content)
+                                                    }).collect();
+                                                    let embed_tokens = query.chars().count().max(1);
+                                                    (format!("知识库检索到以下相关信息（搜索词：{}，Embedding 消耗 ~{} tokens）：\n\n{}",
+                                                        query, embed_tokens, content.join("\n\n---\n\n")), embed_tokens)
+                                                }
+                                            }
+                                            Ok(Err(_)) => (format!("知识库搜索失败（搜索词：{}）", query), 0),
+                                            Err(_) => (format!("知识库搜索超时（搜索词：{}）", query), 0),
+                                        }
+                                    }
+                                    None => {
+                                        // 没有向量库时回退到共享的 rag 参数
+                                        if rag.is_empty() {
+                                            ("知识库中未找到相关文档".to_string(), 0)
+                                        } else {
+                                            (format!("知识库检索到以下相关信息：\n\n{}", rag), 0)
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                let p = format!("任务：{}\n子任务：{}\n(工具:{} 不可用，请直接用 LLM 执行)\n\n上下文：\n{}\n\n输出结果。{}",
+                                    task, at.description, at.tool,
+                                    if ctx.is_empty() { "无" } else { &ctx }, rag);
+                                let mut last_error = String::new();
+                                let mut result = None;
+                                for attempt in 1..=3 {
+                                    match tokio::time::timeout(Duration::from_secs(60),
+                                        llm.invoke(vec![Message::human(&p)], None)
+                                    ).await {
+                                        Ok(Ok(r)) => {
+                                            let t = r.token_usage.as_ref()
+                                                .map(|u| u.total_tokens)
+                                                .unwrap_or_else(|| estimate_token_usage(&p, &r.content));
+                                            result = Some((r.content.clone(), t));
+                                            break;
+                                        }
+                                        Ok(Err(e)) => {
+                                            last_error = e.to_string();
+                                            tracing::warn!("unknown_tool({}) attempt {}/3 failed: {}", at.tool, attempt, last_error);
+                                            if attempt < 3 {
+                                                tokio::time::sleep(std::time::Duration::from_secs([1, 3, 5][attempt - 1])).await;
+                                            }
+                                        }
+                                        Err(_) => {
+                                            last_error = "timeout".to_string();
+                                            tracing::warn!("unknown_tool({}) attempt {}/3 timeout", at.tool, attempt);
+                                            if attempt < 3 {
+                                                tokio::time::sleep(std::time::Duration::from_secs([1, 3, 5][attempt - 1])).await;
+                                            }
+                                        }
+                                    }
+                                }
+                                match result {
+                                    Some(r) => r,
+                                    None => (format!("执行失败(重试3次后): {}", last_error), 0),
                                 }
                             }
                         }
-                        _ => {
-                            let p = format!("任务：{}\n子任务：{}\n(工具:{} 不可用，请直接用 LLM 执行)\n\n上下文：\n{}\n\n输出结果。{}",
-                                task, at.description, at.tool,
-                                if ctx.is_empty() { "无" } else { &ctx }, rag);
-                            match llm.invoke(vec![Message::human(&p)], None).await {
-                                Ok(r) => {
-                                    let t = r.token_usage.as_ref()
-                                        .map(|u| u.total_tokens)
-                                        .unwrap_or_else(|| estimate_token_usage(&p, &r.content));
-                                    (r.content.clone(), t)
-                                }
-                                Err(e) => (format!("执行失败: {}", e), 0),
-                            }
+                    };
+
+                        (output, tokens)
+                    });
+
+                    match handle.await {
+                        Ok((output, tokens)) => {
+                            let elapsed = task_start.elapsed().as_millis() as u64;
+                            tracing::info!(task_name = %task_name, duration_ms = elapsed, tokens = tokens, "任务完成");
+                            let mut new_state = state;
+                            new_state.add_message(MessageEntry::ai(
+                                serde_json::json!({
+                                    "task": task_name,
+                                    "output": output,
+                                    "tokens": tokens,
+                                    "duration_ms": elapsed,
+                                    "tool": tool_name,
+                                    "input_summary": input_template,
+                                }).to_string()
+                            ));
+                            Ok(StateUpdate::full(new_state))
+                        }
+                        Err(e) => {
+                            let elapsed = task_start.elapsed().as_millis() as u64;
+                            tracing::warn!(task_name = %task_name, error = %e, "任务执行失败");
+                            let mut new_state = state;
+                            new_state.add_message(MessageEntry::ai(
+                                serde_json::json!({
+                                    "task": task_name,
+                                    "output": format!("任务 panic: {}", e),
+                                    "tokens": 0,
+                                    "duration_ms": elapsed,
+                                    "tool": tool_name,
+                                    "input_summary": input_template,
+                                }).to_string()
+                            ));
+                            Ok(StateUpdate::full(new_state))
                         }
                     }
-                };
-
-                    let elapsed = task_start.elapsed().as_millis() as u64;
-                    let mut new_state = state.clone();
-                    new_state.add_message(MessageEntry::ai(
-                        serde_json::json!({
-                            "task": at.name,
-                            "output": output,
-                            "tokens": tokens,
-                            "duration_ms": elapsed,
-                            "tool": at.tool,
-                            "input_summary": at.input_template,
-                        }).to_string()
-                    ));
-                    Ok(StateUpdate::full(new_state))
                 }
             });
         }
@@ -444,23 +692,69 @@ impl AgentEngine {
 
     /// ── 开始执行（返回第一批结果 + session_id） ──
     /// 使用框架 invoke_parallel 并行执行第一批就绪任务
-    pub async fn execute_batch_start(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>) -> Result<(String, Vec<AgentExecResult>, bool), GraphDemoError> {
+    pub async fn execute_batch_start(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>, pool: Option<SqlitePool>) -> Result<(String, Vec<AgentExecResult>, bool), GraphDemoError> {
         let sid = Uuid::new_v4().to_string();
         let done: HashSet<String> = HashSet::new();
         let batch = Self::ready_batch(&agent_tasks, &done);
         if batch.is_empty() { return Err(GraphDemoError::BuildError("没有可执行的任务".into())); }
 
         let results = Self::run_batch_with_framework(config, &task, &batch, &[], &rag_context, vector_store).await?;
-        let completed_names: HashSet<String> = results.iter().map(|r| r.task_name.clone()).collect();
 
-        let has_more = {
+        // 路由逻辑：如果本批有决策节点，跳过未选中的分支
+        let mut skipped_names: HashSet<String> = HashSet::new();
+        let mut skipped_results: Vec<AgentExecResult> = Vec::new();
+        for r in &results {
+            if let Some(decided) = Self::parse_decision(&r.output) {
+                if let Some(task_def) = agent_tasks.iter().find(|t| t.name == r.task_name) {
+                    let mut matched = false;
+                    for (route_key, next_task) in &task_def.routes {
+                        if route_key == &decided {
+                            matched = true;
+                        } else {
+                            Self::skip_downstream(&agent_tasks, next_task, &mut skipped_names, &mut skipped_results);
+                        }
+                    }
+                    if !matched {
+                        // 决策结果未匹配任何 route 时不跳过任务，让后续任务正常执行
+                        tracing::info!("决策结果「{}」未匹配 route，后续任务继续执行", decided);
+                    }
+                }
+            }
+        }
+
+        let review_pending: Vec<AgentTask> = batch.iter()
+            .filter(|t| t.task_type == "human_review")
+            .cloned()
+            .collect();
+
+        let mut completed_names: HashSet<String> = results.iter()
+            .filter(|r| !review_pending.iter().any(|p| p.name == r.task_name))
+            .map(|r| r.task_name.clone())
+            .collect();
+        completed_names.extend(skipped_names);
+
+        let mut done_results: Vec<AgentExecResult> = results.iter()
+            .filter(|r| !review_pending.iter().any(|p| p.name == r.task_name))
+            .cloned()
+            .collect();
+        done_results.extend(skipped_results);
+
+        if let Some(ref p) = pool {
+            let _ = ensure_agent_tables(p).await;
+            save_agent_session(p, &sid, &task).await;
+            for r in &done_results {
+                save_agent_result(p, &sid, r).await;
+            }
+        }
+
+        let has_more = review_pending.is_empty() && {
             let remaining = Self::ready_batch(&agent_tasks, &completed_names);
             remaining.iter().any(|t| !completed_names.contains(&t.name))
         };
 
         let all = agent_tasks.clone();
         store().lock().unwrap().get_or_insert_with(HashMap::new).insert(sid.clone(), BatchState {
-            task, all, done: results.clone(), completed_names, start: Instant::now(), rag_context,
+            task, all, done: done_results.clone(), completed_names, start: Instant::now(), rag_context, review_pending,
         });
 
         Ok((sid, results, has_more))
@@ -468,7 +762,16 @@ impl AgentEngine {
 
     /// ── 下一批 ──
     /// 使用框架 invoke_parallel 并行执行下一批就绪任务
-    pub async fn execute_batch_next(config: &Config, sid: &str, vector_store: Option<Arc<QdrantStore>>) -> Result<(Vec<AgentExecResult>, bool), GraphDemoError> {
+    pub async fn execute_batch_next(config: &Config, sid: &str, vector_store: Option<Arc<QdrantStore>>, pool: Option<SqlitePool>) -> Result<(Vec<AgentExecResult>, bool), GraphDemoError> {
+        {
+            let g = store().lock().unwrap();
+            if let Some(s) = g.as_ref().unwrap().get(sid) {
+                if !s.review_pending.is_empty() {
+                    return Err(GraphDemoError::BuildError("有待审批的人工审核任务，请先审批".into()));
+                }
+            }
+        }
+
         let (task, all, done_names, rag_context) = {
             let g = store().lock().unwrap();
             let m = g.as_ref().unwrap();
@@ -484,35 +787,83 @@ impl AgentEngine {
             g.as_ref().unwrap().get(sid).map(|s| s.done.clone()).unwrap_or_default()
         };
         let results = Self::run_batch_with_framework(config, &task, &batch, &context, &rag_context, vector_store).await?;
+
+        let new_review_pending: Vec<AgentTask> = batch.iter()
+            .filter(|t| t.task_type == "human_review")
+            .cloned()
+            .collect();
+
         let has_more;
         {
             let mut g = store().lock().unwrap();
             if let Some(s) = g.as_mut().unwrap().get_mut(sid) {
                 for r in &results {
-                    s.done.push(r.clone());
-                    s.completed_names.insert(r.task_name.clone());
+                    let is_review = new_review_pending.iter().any(|p| p.name == r.task_name);
+                    if !is_review {
+                        s.done.push(r.clone());
+                        s.completed_names.insert(r.task_name.clone());
+                    }
+                }
+                // 路由逻辑：决策节点结果出来后，跳过未选中的分支
+                for r in &results {
+                    if let Some(decided) = Self::parse_decision(&r.output) {
+                        if let Some(task_def) = all.iter().find(|t| t.name == r.task_name) {
+                            let mut matched = false;
+                            for (route_key, next_task) in &task_def.routes {
+                                if route_key == &decided {
+                                    matched = true;
+                                } else {
+                                    Self::skip_downstream(&all, next_task, &mut s.completed_names, &mut s.done);
+                                }
+                            }
+                            if !matched {
+                                tracing::info!("决策结果「{}」未匹配 route，后续任务继续执行", decided);
+                            }
+                        }
+                    }
+                }
+                for t in &new_review_pending {
+                    if !s.review_pending.iter().any(|p| p.name == t.name) {
+                        s.review_pending.push(t.clone());
+                    }
                 }
             }
-            has_more = g.as_ref().unwrap().get(sid).map(|s| s.completed_names.len() < s.all.len()).unwrap_or(false);
+            has_more = g.as_ref().unwrap().get(sid)
+                .map(|s| s.review_pending.is_empty() && s.completed_names.len() < s.all.len())
+                .unwrap_or(false);
         }
+
+        if let Some(ref p) = pool {
+            for r in &results {
+                if !new_review_pending.iter().any(|t| t.name == r.task_name) {
+                    save_agent_result(p, sid, r).await;
+                }
+            }
+            if !has_more && new_review_pending.is_empty() {
+                update_agent_session_status(p, sid, "completed").await;
+            }
+        }
+
         Ok((results, has_more))
     }
 
     /// 从决策节点的输出中解析出选中的路由 key
     fn parse_decision(output: &str) -> Option<String> {
         let lower = output.to_lowercase();
-        // 支持多种输出格式
-        for keyword in &["通过", "充分", "enough", "yes", "tech", "general", "不通过", "不充分", "not enough", "no", "other"] {
+        // 按优先级匹配关键词，返回匹配到的原文（与 route key 保持一致）
+        let keywords = ["通过", "充分", "enough", "yes", "不通过", "不充分", "not enough", "no", "tech", "general", "other"];
+        for keyword in &keywords {
             if lower.contains(keyword) {
-                return Some(match *keyword {
-                    "通过" | "充分" | "enough" | "yes" => "通过".to_string(),
-                    "不通过" | "不充分" | "not enough" | "no" => "不通过".to_string(),
-                    "tech" => "tech".to_string(),
-                    "general" => "general".to_string(),
-                    "other" => "other".to_string(),
-                    _ => keyword.to_string(),
-                });
+                return Some(keyword.to_string());
             }
+        }
+        // 如果包含中文的"充足"、"足够"等也判定为"充分"
+        if lower.contains("充足") || lower.contains("足够") || lower.contains("够") {
+            return Some("充分".to_string());
+        }
+        // 如果包含"不足"、"缺少"等判定为"不充分"
+        if lower.contains("不足") || lower.contains("缺少") {
+            return Some("不充分".to_string());
         }
         None
     }
@@ -561,12 +912,18 @@ impl AgentEngine {
                 if let Some(decided) = Self::parse_decision(&r.output) {
                     // 找到这个决策任务对应的 AgentTask
                     if let Some(task_def) = agent_tasks.iter().find(|t| t.name == r.task_name) {
+                        let mut matched = false;
                         // 遍历 routes，把非选中的分支对应的后续任务标记为已完成（跳过）
                         for (route_key, next_task) in &task_def.routes {
-                            if route_key != &decided {
+                            if route_key == &decided {
+                                matched = true;
+                            } else {
                                 // 找到这个 next_task 及其所有下游任务，标记为跳过
                                 Self::skip_downstream(&agent_tasks, next_task, &mut done, &mut all_results);
                             }
+                        }
+                        if !matched {
+                            tracing::warn!("决策结果「{}」未匹配任何 route，无对应分支可执行", decided);
                         }
                     }
                 }
@@ -586,13 +943,18 @@ impl AgentEngine {
     }
 
     /// ── 完成验证 ──
-    pub async fn batch_finalize(sid: &str) -> Result<AgentExecResponse, GraphDemoError> {
+    pub async fn batch_finalize(sid: &str, pool: Option<SqlitePool>) -> Result<AgentExecResponse, GraphDemoError> {
         let state = {
             let g = store().lock().unwrap();
             let m = g.as_ref().unwrap();
             m.get(sid).map(|s| (s.task.clone(), s.done.clone(), s.start))
         };
         store().lock().unwrap().as_mut().unwrap().remove(sid);
+
+        if let Some(ref p) = pool {
+            update_agent_session_status(p, sid, "completed").await;
+        }
+
         match state {
             Some((_task, results, start)) => {
                 let fa = results.last().map(|r| r.output.clone()).unwrap_or_default();
@@ -603,16 +965,51 @@ impl AgentEngine {
         }
     }
 
+    /// ── 人工审批 ──
+    pub async fn approve_review(sid: &str, task_name: &str, approved: bool, feedback: &str) -> Result<(), GraphDemoError> {
+        let mut g = store().lock().unwrap();
+        let m = g.as_mut().unwrap();
+        let s = m.get_mut(sid).ok_or_else(|| GraphDemoError::BuildError("session不存在".into()))?;
+
+        let idx = s.review_pending.iter().position(|t| t.name == task_name)
+            .ok_or_else(|| GraphDemoError::BuildError("找不到待审批任务".into()))?;
+        let task = s.review_pending.remove(idx);
+
+        if approved {
+            s.completed_names.insert(task_name.to_string());
+            s.done.push(AgentExecResult {
+                task_name: task_name.to_string(),
+                tool: "human_review".to_string(),
+                input_summary: task.description.clone(),
+                output: format!("✅ 人工审批通过。反馈：{}", feedback),
+                duration_ms: 0,
+                tokens: 0,
+            });
+        } else {
+            s.done.push(AgentExecResult {
+                task_name: task_name.to_string(),
+                tool: "human_review".to_string(),
+                input_summary: task.description.clone(),
+                output: format!("❌ 人工审批拒绝。反馈：{}", feedback),
+                duration_ms: 0,
+                tokens: 0,
+            });
+            s.completed_names.insert(task_name.to_string());
+        }
+
+        Ok(())
+    }
+
     /// ── 兼容旧接口（一次性跑完所有批次） ──
     pub async fn plan_and_execute(config: &Config, task: String) -> Result<AgentExecResponse, GraphDemoError> {
         let plan = Self::plan(config, task.clone(), String::new(), false, false).await?;
-        let (sid, mut all, _) = Self::execute_batch_start(config, task, plan.tasks, String::new(), None).await?;
+        let (sid, mut all, _) = Self::execute_batch_start(config, task, plan.tasks, String::new(), None, None).await?;
         loop {
-            let (batch, has_more) = Self::execute_batch_next(config, &sid, None).await?;
+            let (batch, has_more) = Self::execute_batch_next(config, &sid, None, None).await?;
             all.extend(batch);
             if !has_more { break; }
         }
-        Self::batch_finalize(&sid).await
+        Self::batch_finalize(&sid, None).await
     }
 }
 
@@ -686,7 +1083,7 @@ mod tests {
 
         let sid = uuid::Uuid::new_v4().to_string();
         store().lock().unwrap().get_or_insert_with(HashMap::new).insert(sid.clone(), BatchState {
-            task, all, done, completed_names: completed, start: Instant::now(), rag_context: String::new(),
+            task, all, done, completed_names: completed, start: Instant::now(), rag_context: String::new(), review_pending: Vec::new(),
         });
 
         // 验证存储和读取
