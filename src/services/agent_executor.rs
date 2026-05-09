@@ -1,13 +1,14 @@
 use crate::config::Config;
 use crate::errors::GraphDemoError;
 use crate::models::*;
+use crate::stores::QdrantStore;
 use langchainrust::langgraph::{
     AgentState, CompiledGraph, MessageEntry, ParallelInvocation,
     StateGraph, StateUpdate, START, END,
 };
 use langchainrust::{language_models::OpenAIChat, schema::Message, core::runnables::Runnable};
 use std::collections::{HashSet, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::time::Duration;
 use uuid::Uuid;
@@ -58,11 +59,35 @@ impl AgentEngine {
                 format!("\n\n知识库检索到以下相关信息：\n{}", rag_context)
             };
             format!(
-                "第一个子任务必须是「知识库检索」，使用 rag_search 工具。后续子任务基于知识库检索的结果执行。{rag}\n将任务拆解为2-5个子任务并分配工具。没有依赖关系的子任务可以并行执行（depends_on 为空表示该任务没有前置依赖，可以和其他没有依赖的任务同时执行）。可用工具：[{tools}] 返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}] 任务：{task} 只返回JSON。name和description必须用中文。",
+                "第一个子任务必须是「知识库检索」，使用 rag_search 工具。后续子任务基于知识库检索的结果执行。{rag}\n\
+                 将任务拆解为2-5个子任务并分配工具。\n\
+                 要求：\n\
+                 1. 对比类任务（如比较A和B）必须将A和B拆成独立的搜索/调研子任务，depends_on 为空，以便并行执行\n\
+                 2. 每个子任务职责单一，不要合并多个不同的工作\n\
+                 3. 最终汇总/分析任务 depends_on 前置的所有搜索任务\n\
+                 示例：用户说\"比较go和python\"，应该拆成：\n\
+                   [{{\"name\":\"调研Go\", \"depends_on\":[]}}, {{\"name\":\"调研Python\", \"depends_on\":[]}}, {{\"name\":\"对比分析\", \"depends_on\":[\"调研Go\",\"调研Python\"]}}]\n\
+                 可用工具：[{tools}]\n\
+                 返回JSON格式：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
+                 任务：{task}\n\
+                 只返回JSON。name和description必须用中文。",
                 rag = rag_context_block, tools = tj, task = task
             )
         } else {
-            format!("将任务拆解为2-5个子任务并分配工具。没有依赖关系的子任务可以并行执行（depends_on 为空表示该任务没有前置依赖，可以和其他没有依赖的任务同时执行）。可用工具：[{tools}] 返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}] 任务：{task} 只返回JSON。name和description必须用中文。", tools = tj, task = task)
+            format!(
+                "将任务拆解为2-5个子任务并分配工具。\n\
+                 要求：\n\
+                 1. 对比类任务（如比较A和B）必须将A和B拆成独立的搜索/调研子任务，depends_on 为空，以便并行执行\n\
+                 2. 每个子任务职责单一，不要合并多个不同的工作\n\
+                 3. 最终汇总/分析任务 depends_on 前置的所有搜索任务\n\
+                 示例：用户说\"比较go和python\"，应该拆成：\n\
+                   [{{\"name\":\"调研Go\", \"depends_on\":[]}}, {{\"name\":\"调研Python\", \"depends_on\":[]}}, {{\"name\":\"对比分析\", \"depends_on\":[\"调研Go\",\"调研Python\"]}}]\n\
+                 可用工具：[{tools}]\n\
+                 返回JSON格式：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
+                 任务：{task}\n\
+                 只返回JSON。name和description必须用中文。",
+                tools = tj, task = task
+            )
         };
         let r = llm.invoke(vec![Message::human(&p)], None).await.map_err(|e| GraphDemoError::ExecutionError(e.to_string()))?;
         let c = r.content.trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
@@ -110,12 +135,14 @@ impl AgentEngine {
     // ──────────────────────── 框架集成 ────────────────────────
 
     /// 用框架构建单层图：dispatch → FanOut(batch) → FanIn → END
+    /// vector_store 不为空时，rag_search 工具会用任务名独立搜索（不再共享 rag 参数）
     fn build_batch_graph(
         config: Config,
         task: String,
         batch: Vec<AgentTask>,
         ctx: String,
         rag: String,
+        vector_store: Option<Arc<QdrantStore>>,
     ) -> Result<CompiledGraph<AgentState>, GraphDemoError> {
         let mut graph = StateGraph::<AgentState>::new();
 
@@ -131,6 +158,7 @@ impl AgentEngine {
             let task = task.clone();
             let ctx = ctx.clone();
             let rag = rag.clone();
+            let vector_store = vector_store.clone();
 
             graph.add_async_node(at.name.clone(), move |state: &AgentState| {
                 let at = at.clone();
@@ -139,6 +167,7 @@ impl AgentEngine {
                 let ctx = ctx.clone();
                 let rag = rag.clone();
                 let state = state.clone();
+                let vector_store = vector_store.clone();
 
                 async move {
                     let task_start = Instant::now();
@@ -192,11 +221,41 @@ impl AgentEngine {
                             }
                         }
                         "rag_search" => {
-                            let embed_tokens = at.input_template.chars().count().max(1);
-                            if rag.is_empty() {
-                                (format!("知识库中未找到相关文档（Embedding 消耗 ~{} tokens）", embed_tokens), embed_tokens)
+                            // 用任务名独立搜索向量库
+                            let query = if at.input_template.is_empty() {
+                                at.name.clone()
                             } else {
-                                (format!("知识库检索到以下相关信息（Embedding 消耗 ~{} tokens）：\n\n{}", embed_tokens, rag), embed_tokens)
+                                at.input_template.clone()
+                            };
+                            match &vector_store {
+                                Some(store) => {
+                                    match store.search_rag(&query, 3).await {
+                                        Ok(results) => {
+                                            let filtered: Vec<_> = results.iter()
+                                                .filter(|r| r.score >= 0.3)
+                                                .collect();
+                                            if filtered.is_empty() {
+                                                (format!("知识库中未找到相关文档（搜索词：{}）", query), 0)
+                                            } else {
+                                                let content: Vec<String> = filtered.iter().map(|r| {
+                                                    format!("[相关性 {:.1}%]\n{}", r.score * 100.0, r.document.content)
+                                                }).collect();
+                                                let embed_tokens = query.chars().count().max(1);
+                                                (format!("知识库检索到以下相关信息（搜索词：{}，Embedding 消耗 ~{} tokens）：\n\n{}",
+                                                    query, embed_tokens, content.join("\n\n---\n\n")), embed_tokens)
+                                            }
+                                        }
+                                        Err(_) => (format!("知识库搜索失败（搜索词：{}）", query), 0),
+                                    }
+                                }
+                                None => {
+                                    // 没有向量库时回退到共享的 rag 参数
+                                    if rag.is_empty() {
+                                        ("知识库中未找到相关文档".to_string(), 0)
+                                    } else {
+                                        (format!("知识库检索到以下相关信息：\n\n{}", rag), 0)
+                                    }
+                                }
                             }
                         }
                         _ => {
@@ -274,6 +333,7 @@ impl AgentEngine {
         batch: &[AgentTask],
         context: &[AgentExecResult],
         rag_context: &str,
+        vector_store: Option<Arc<QdrantStore>>,
     ) -> Result<Vec<AgentExecResult>, GraphDemoError> {
         let ctx: String = context.iter()
             .map(|r| format!("【{}】\n{}", r.task_name, r.output))
@@ -290,6 +350,7 @@ impl AgentEngine {
             batch.to_vec(),
             ctx,
             rag,
+            vector_store,
         )?;
 
         let initial = AgentState::new(task.to_string());
@@ -301,13 +362,13 @@ impl AgentEngine {
 
     /// ── 开始执行（返回第一批结果 + session_id） ──
     /// 使用框架 invoke_parallel 并行执行第一批就绪任务
-    pub async fn execute_batch_start(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String) -> Result<(String, Vec<AgentExecResult>, bool), GraphDemoError> {
+    pub async fn execute_batch_start(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>) -> Result<(String, Vec<AgentExecResult>, bool), GraphDemoError> {
         let sid = Uuid::new_v4().to_string();
         let done: HashSet<String> = HashSet::new();
         let batch = Self::ready_batch(&agent_tasks, &done);
         if batch.is_empty() { return Err(GraphDemoError::BuildError("没有可执行的任务".into())); }
 
-        let results = Self::run_batch_with_framework(config, &task, &batch, &[], &rag_context).await?;
+        let results = Self::run_batch_with_framework(config, &task, &batch, &[], &rag_context, vector_store).await?;
         let completed_names: HashSet<String> = results.iter().map(|r| r.task_name.clone()).collect();
 
         let has_more = {
@@ -325,7 +386,7 @@ impl AgentEngine {
 
     /// ── 下一批 ──
     /// 使用框架 invoke_parallel 并行执行下一批就绪任务
-    pub async fn execute_batch_next(config: &Config, sid: &str) -> Result<(Vec<AgentExecResult>, bool), GraphDemoError> {
+    pub async fn execute_batch_next(config: &Config, sid: &str, vector_store: Option<Arc<QdrantStore>>) -> Result<(Vec<AgentExecResult>, bool), GraphDemoError> {
         let (task, all, done_names, rag_context) = {
             let g = store().lock().unwrap();
             let m = g.as_ref().unwrap();
@@ -340,7 +401,7 @@ impl AgentEngine {
             let g = store().lock().unwrap();
             g.as_ref().unwrap().get(sid).map(|s| s.done.clone()).unwrap_or_default()
         };
-        let results = Self::run_batch_with_framework(config, &task, &batch, &context, &rag_context).await?;
+        let results = Self::run_batch_with_framework(config, &task, &batch, &context, &rag_context, vector_store).await?;
         let has_more;
         {
             let mut g = store().lock().unwrap();
@@ -357,7 +418,7 @@ impl AgentEngine {
 
     /// ── 按依赖分批并行执行：同批任务 invoke_parallel 并行，不同批串行 ──
     /// 例: A → [B, C] → D  => 第一批: A, 第二批: B+C(并行), 第三批: D
-    pub async fn execute_all_batches(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String) -> Result<AgentExecResponse, GraphDemoError> {
+    pub async fn execute_all_batches(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>) -> Result<AgentExecResponse, GraphDemoError> {
         let total_start = Instant::now();
 
         let mut done: HashSet<String> = HashSet::new();
@@ -369,7 +430,7 @@ impl AgentEngine {
                 break;
             }
 
-            let results = Self::run_batch_with_framework(config, &task, &batch, &all_results, &rag_context).await?;
+            let results = Self::run_batch_with_framework(config, &task, &batch, &all_results, &rag_context, vector_store.clone()).await?;
 
             for r in &results {
                 done.insert(r.task_name.clone());
@@ -410,9 +471,9 @@ impl AgentEngine {
     /// ── 兼容旧接口（一次性跑完所有批次） ──
     pub async fn plan_and_execute(config: &Config, task: String) -> Result<AgentExecResponse, GraphDemoError> {
         let plan = Self::plan(config, task.clone(), String::new(), false).await?;
-        let (sid, mut all, _) = Self::execute_batch_start(config, task, plan.tasks, String::new()).await?;
+        let (sid, mut all, _) = Self::execute_batch_start(config, task, plan.tasks, String::new(), None).await?;
         loop {
-            let (batch, has_more) = Self::execute_batch_next(config, &sid).await?;
+            let (batch, has_more) = Self::execute_batch_next(config, &sid, None).await?;
             all.extend(batch);
             if !has_more { break; }
         }
@@ -510,7 +571,7 @@ mod tests {
 
         // 单任务
         let batch1 = vec![make_task("A", vec![])];
-        let graph1 = AgentEngine::build_batch_graph(config.clone(), "test".into(), batch1, String::new(), String::new());
+        let graph1 = AgentEngine::build_batch_graph(config.clone(), "test".into(), batch1, String::new(), String::new(), None);
         assert!(graph1.is_ok(), "单任务批次应该编译成功");
         let compiled = graph1.unwrap();
         let nodes = compiled.node_names();
@@ -519,7 +580,7 @@ mod tests {
 
         // 多任务
         let batch2 = vec![make_task("A", vec![]), make_task("B", vec![]), make_task("C", vec![])];
-        let graph2 = AgentEngine::build_batch_graph(config, "test".into(), batch2, String::new(), String::new());
+        let graph2 = AgentEngine::build_batch_graph(config, "test".into(), batch2, String::new(), String::new(), None);
         assert!(graph2.is_ok(), "多任务批次应该编译成功");
         let compiled2 = graph2.unwrap();
         assert_eq!(compiled2.node_names().len(), 4); // dispatch + A + B + C
@@ -612,6 +673,7 @@ mod tests {
             batch,
             String::new(),
             String::new(),
+            None,
         );
         assert!(graph.is_ok(), "批次图应该编译成功");
     }
