@@ -774,7 +774,7 @@ function typeWriterEffect(assistantDiv, messagesDiv) {
     window.typewriterQueue = window.typewriterQueue.substring(charsToShow);
     assistantDiv.innerHTML = `<div>${escapeHtml(displayedText)}<span class="streaming">鈻?/span></div>`;
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    const delay = 100;
+    const delay = window.typewriterQueue.length > 50 ? 5 : 15;
     setTimeout(() => typeWriterEffect(assistantDiv, messagesDiv), delay);
 }
 
@@ -1424,7 +1424,15 @@ function renderGraphHtml(structure, annotations) {
     const nodeColors = {};
     nodes.forEach(n => {
         if (n === entry) nodeColors[n] = '#10b981';
-        else nodeColors[n] = '#3b82f6';
+        else {
+            // 检查是否是决策节点
+            const taskDef = _agentPlanData && _agentPlanData.tasks ? _agentPlanData.tasks.find(t => t.name === n) : null;
+            if (taskDef && taskDef.task_type === 'decision') {
+                nodeColors[n] = '#f59e0b'; // 橙色=决策节点
+            } else {
+                nodeColors[n] = '#3b82f6';
+            }
+        }
     });
 
     let html = '<div style="display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px;">';
@@ -1435,6 +1443,23 @@ function renderGraphHtml(structure, annotations) {
     html += renderGraphNode('END', '#ef4444', 'END', null);
     html += '</div>';
     return html;
+}
+
+function renderDecisionNode(name, color, label, annotation, routes) {
+    // 决策节点：显示为菱形，标注路由选项
+    const bg = color + '22';
+    const border = color;
+    const routeHtml = routes ? Object.entries(routes).map(([k, v]) =>
+        `<div style="font-size:10px;color:#d97706;">${k} → ${v}</div>`
+    ).join('') : '';
+    return `<div style="display:flex;flex-direction:column;align-items:center;">
+        <div style="background:${bg};border:2px solid ${border};border-radius:4px;transform:rotate(45deg);
+            width:60px;height:60px;display:flex;align-items:center;justify-content:center;margin:8px;">
+            <div style="transform:rotate(-45deg);text-align:center;font-size:11px;font-weight:bold;color:${border};">🤔 ${name}</div>
+        </div>
+        ${annotation ? `<div style="font-size:10px;color:#64748b;margin-top:2px;max-width:120px;text-align:center;word-break:break-all;">${annotation.label}</div>` : ''}
+        ${routeHtml}
+    </div>`;
 }
 
 function renderFlowLevel(nodes, edges, entry, nodeColors, annotations) {
@@ -1466,11 +1491,22 @@ function renderFlowLevel(nodes, edges, entry, nodeColors, annotations) {
     levels.forEach((level, li) => {
         if (li > 0) html += renderArrow();
         if (level.length === 1) {
-            html += renderGraphNode(level[0], nodeColors[level[0]] || '#3b82f6', level[0], annotations[level[0]] || null);
+            const n = level[0];
+            const taskDef = _agentPlanData && _agentPlanData.tasks ? _agentPlanData.tasks.find(t => t.name === n) : null;
+            if (taskDef && taskDef.task_type === 'decision') {
+                html += renderDecisionNode(n, nodeColors[n], n, annotations[n] || null, taskDef.routes);
+            } else {
+                html += renderGraphNode(n, nodeColors[n] || '#3b82f6', n, annotations[n] || null);
+            }
         } else {
             html += '<div style="display:flex;gap:24px;justify-content:center;">';
             level.forEach(n => {
-                html += renderGraphNode(n, nodeColors[n] || '#3b82f6', n, annotations[n] || null);
+                const taskDef = _agentPlanData && _agentPlanData.tasks ? _agentPlanData.tasks.find(t => t.name === n) : null;
+                if (taskDef && taskDef.task_type === 'decision') {
+                    html += renderDecisionNode(n, nodeColors[n], n, annotations[n] || null, taskDef.routes);
+                } else {
+                    html += renderGraphNode(n, nodeColors[n] || '#3b82f6', n, annotations[n] || null);
+                }
             });
             html += '</div>';
         }
@@ -1811,9 +1847,11 @@ async function agentFetchAndShow(isFirst) {
         html += '<h4 style="margin:0 0 10px 0;color:#7c3aed;">鎵ц缁撴灉</h4>';
         html += '<table style="width:100%"><thead><tr style="background:#f5f3ff;"><th>浠诲姟</th><th>杈撳嚭</th><th style="width:70px;">鑰楁椂/Token</th></tr></thead><tbody>';
         _agentAllResults.forEach(r => {
-            html += '<tr><td style="padding:8px;font-weight:bold;">' + escapeHtml(r.task_name) + '</td>';
-            html += '<td style="padding:8px;font-size:13px;">' + escapeHtml(r.output) + '</td>';
-            html += '<td style="padding:4px;font-size:10px;color:#94a3b8;text-align:center;line-height:1.6;">' + (r.duration_ms||0) + 'ms<br>' + (r.tokens||0) + 't</td></tr>';
+            const isSkipped = r.output && r.output.includes('⏭️');
+            html += `<tr style="${isSkipped ? 'opacity:0.5;text-decoration:line-through;' : ''}">
+                <td style="padding:8px;font-weight:bold;">${escapeHtml(r.task_name)}</td>
+                <td style="padding:8px;font-size:13px;${isSkipped ? 'color:#94a3b8;' : ''}">${escapeHtml(r.output)}</td>
+                <td style="padding:4px;font-size:11px;color:#94a3b8;text-align:right;">${(r.duration_ms||0)}ms | ${(r.tokens||0)}t</td></tr>`;
         });
         html += '</tbody></table>';
 
@@ -1908,6 +1946,7 @@ document.addEventListener('DOMContentLoaded', function() {
     
     initDarkMode();
 });
+
 
 
 
