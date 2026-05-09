@@ -1,14 +1,16 @@
 use crate::config::Config;
 use crate::errors::GraphDemoError;
 use crate::models::*;
+use langchainrust::langgraph::{
+    AgentState, CompiledGraph, MessageEntry, ParallelInvocation,
+    StateGraph, StateUpdate, START, END,
+};
 use langchainrust::{language_models::OpenAIChat, schema::Message, core::runnables::Runnable};
 use std::collections::{HashSet, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Instant;
 use tokio::time::Duration;
 use uuid::Uuid;
-use futures_util::future::join_all;
-use futures_util::FutureExt;
 
 pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("llm_query","直接用 LLM 回答"),("web_search","搜索网络获取信息"),("weather","查询天气"),
@@ -16,7 +18,21 @@ pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
     ("rag_search","检索知识库（RAG）获取与任务相关的文档内容"),
 ];
 
-// ── 状态存储 ──
+// ── 天气查询（提取为自由函数，run_batch 和框架版本共用） ──
+async fn query_weather(city: &str) -> Result<String, String> {
+    let e: String = city.chars().map(|c| match c { 'A'..='Z'|'a'..='z'|'0'..='9'|'-'|'_'|'.'|'~' => c.to_string(), _ => format!("%{:02X}",c as u8) }).collect();
+    reqwest::get(&format!("https://wttr.in/{}?format=%C+|+%t+|+%h+|+%w&lang=zh", e)).await
+        .map_err(|e| e.to_string())?.text().await.map_err(|e| e.to_string())
+}
+
+/// 当 API 不返回 token_usage 时，用文本长度估算 token 数
+fn estimate_token_usage(prompt: &str, response: &str) -> usize {
+    let input_tokens = prompt.chars().count() / 2 + 1;
+    let output_tokens = response.chars().count() / 2 + 1;
+    input_tokens + output_tokens
+}
+
+// ── 状态存储（保留 session 管理） ──
 struct BatchState {
     task: String,
     all: Vec<AgentTask>,
@@ -57,15 +73,25 @@ impl AgentEngine {
     }
 
     fn build_graph(tasks: &[AgentTask]) -> serde_json::Value {
+        let names: HashSet<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
         let nodes: Vec<String> = tasks.iter().map(|t| t.name.clone()).collect();
         let mut edges = vec![];
-        for i in 0..tasks.len() {
-            if i==0 { edges.push(serde_json::json!({"type":"fixed","source":"__start__","target":tasks[i].name})); }
-            if i+1<tasks.len() { edges.push(serde_json::json!({"type":"fixed","source":tasks[i].name,"target":tasks[i+1].name})); }
+
+        // START → 没有依赖的任务（可以直接开始）
+        for task in tasks {
+            if task.depends_on.iter().all(|d| !names.contains(d.as_str())) {
+                edges.push(serde_json::json!({"type":"fixed","source":"__start__","target":task.name}));
+            }
         }
-        for i in 0..tasks.len() {
-            for d in &tasks[i].depends_on { if nodes.contains(d) { edges.push(serde_json::json!({"type":"fixed","source":d,"target":tasks[i].name})); } }
-            edges.push(serde_json::json!({"type":"fixed","source":tasks[i].name,"target":"__end__"}));
+
+        // depends_on 边 + 每个任务到 END
+        for task in tasks {
+            for d in &task.depends_on {
+                if names.contains(d.as_str()) {
+                    edges.push(serde_json::json!({"type":"fixed","source":d,"target":task.name}));
+                }
+            }
+            edges.push(serde_json::json!({"type":"fixed","source":task.name,"target":"__end__"}));
         }
         serde_json::json!({"entry_point":tasks[0].name,"nodes":nodes,"edges":edges,"routers":[]})
     }
@@ -81,14 +107,207 @@ impl AgentEngine {
         }).cloned().collect()
     }
 
+    // ──────────────────────── 框架集成 ────────────────────────
+
+    /// 用框架构建单层图：dispatch → FanOut(batch) → FanIn → END
+    fn build_batch_graph(
+        config: Config,
+        task: String,
+        batch: Vec<AgentTask>,
+        ctx: String,
+        rag: String,
+    ) -> Result<CompiledGraph<AgentState>, GraphDemoError> {
+        let mut graph = StateGraph::<AgentState>::new();
+
+        // 空节点，作为 FanOut 的入口
+        graph.add_node_fn("__dispatch__", |state| {
+            Ok(StateUpdate::full(state.clone()))
+        });
+
+        // 每个任务一个 AsyncNode
+        for at in &batch {
+            let at = at.clone();
+            let config = config.clone();
+            let task = task.clone();
+            let ctx = ctx.clone();
+            let rag = rag.clone();
+
+            graph.add_async_node(at.name.clone(), move |state: &AgentState| {
+                let at = at.clone();
+                let config = config.clone();
+                let task = task.clone();
+                let ctx = ctx.clone();
+                let rag = rag.clone();
+                let state = state.clone();
+
+                async move {
+                    let task_start = Instant::now();
+                    let llm = OpenAIChat::new(
+                        config.to_langchain_openai_config().with_max_tokens(2048)
+                    );
+
+                    let (output, tokens) = match at.tool.as_str() {
+                        "llm_query" | "" => {
+                            let p = if ctx.is_empty() {
+                                format!("任务：{}\n当前子任务：{}\n\n请执行当前子任务并输出结果。{}",
+                                    task, at.description, rag)
+                            } else {
+                                format!("任务：{}\n当前子任务：{}\n\n前置完成的任务结果：\n{}\n\n请基于前置结果执行当前子任务并输出。{}",
+                                    task, at.description, ctx, rag)
+                            };
+                            match tokio::time::timeout(Duration::from_secs(120),
+                                llm.invoke(vec![Message::human(&p)], None)
+                            ).await {
+                                Ok(Ok(r)) => {
+                                    let t = r.token_usage.as_ref()
+                                        .map(|u| u.total_tokens)
+                                        .unwrap_or_else(|| estimate_token_usage(&p, &r.content));
+                                    (r.content.clone(), t)
+                                }
+                                _ => ("执行失败".to_string(), 0),
+                            }
+                        }
+                        "web_search" => {
+                            let p = format!("任务：{}\n当前子任务：{}\n\n请基于你的知识回答。{}",
+                                task, at.description, rag);
+                            match llm.invoke(vec![Message::human(&p)], None).await {
+                                Ok(r) => {
+                                    let t = r.token_usage.as_ref()
+                                        .map(|u| u.total_tokens)
+                                        .unwrap_or_else(|| estimate_token_usage(&p, &r.content));
+                                    (r.content.clone(), t)
+                                }
+                                Err(e) => (format!("执行失败: {}", e), 0),
+                            }
+                        }
+                        "weather" => {
+                            let city_prompt = format!("任务：{}\n当前子任务：{}\n\n请输出要查询天气的城市名，不要多余内容。",
+                                task, at.description);
+                            let city = llm.invoke(vec![Message::human(&city_prompt)], None).await
+                                .map(|r| r.content.trim().to_string())
+                                .unwrap_or_else(|_| at.description.clone());
+                            match query_weather(&city).await {
+                                Ok(r) => (format!("{}的天气：{}", city, r), 0),
+                                Err(e) => (format!("天气查询失败: {}", e), 0),
+                            }
+                        }
+                        "rag_search" => {
+                            let embed_tokens = at.input_template.chars().count().max(1);
+                            if rag.is_empty() {
+                                (format!("知识库中未找到相关文档（Embedding 消耗 ~{} tokens）", embed_tokens), embed_tokens)
+                            } else {
+                                (format!("知识库检索到以下相关信息（Embedding 消耗 ~{} tokens）：\n\n{}", embed_tokens, rag), embed_tokens)
+                            }
+                        }
+                        _ => {
+                            let p = format!("任务：{}\n子任务：{}\n(工具:{} 不可用，请直接用 LLM 执行)\n\n上下文：\n{}\n\n输出结果。{}",
+                                task, at.description, at.tool,
+                                if ctx.is_empty() { "无" } else { &ctx }, rag);
+                            match llm.invoke(vec![Message::human(&p)], None).await {
+                                Ok(r) => {
+                                    let t = r.token_usage.as_ref()
+                                        .map(|u| u.total_tokens)
+                                        .unwrap_or_else(|| estimate_token_usage(&p, &r.content));
+                                    (r.content.clone(), t)
+                                }
+                                Err(e) => (format!("执行失败: {}", e), 0),
+                            }
+                        }
+                    };
+
+                    let elapsed = task_start.elapsed().as_millis() as u64;
+                    let mut new_state = state.clone();
+                    new_state.add_message(MessageEntry::ai(
+                        serde_json::json!({
+                            "task": at.name,
+                            "output": output,
+                            "tokens": tokens,
+                            "duration_ms": elapsed,
+                            "tool": at.tool,
+                            "input_summary": at.input_template,
+                        }).to_string()
+                    ));
+                    Ok(StateUpdate::full(new_state))
+                }
+            });
+        }
+
+        // 边结构：dispatch → FanOut → 每个任务各自到 END
+        let names: Vec<String> = batch.iter().map(|t| t.name.clone()).collect();
+        graph.add_edge(START, "__dispatch__");
+        graph.add_fan_out("__dispatch__", names.clone());
+        for name in &names {
+            graph.add_edge(name.clone(), END);
+        }
+
+        graph.compile().map_err(|e| GraphDemoError::BuildError(e.to_string()))
+    }
+
+    /// 从 invoke_parallel 的结果中提取每个任务的输出
+    fn extract_results(invocation: &ParallelInvocation<AgentState>) -> Vec<AgentExecResult> {
+        let mut results = Vec::new();
+        for branch in &invocation.parallel_branches {
+            // 每条消息是 JSON：{"task":"...","output":"...","tokens":N,"duration_ms":N}
+            for msg in branch.final_state.messages.iter().rev() {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+                    if parsed.get("task").and_then(|v| v.as_str()).is_some() {
+                        results.push(AgentExecResult {
+                            task_name: parsed["task"].as_str().unwrap_or("").to_string(),
+                            output: parsed["output"].as_str().unwrap_or("").to_string(),
+                            tokens: parsed["tokens"].as_u64().unwrap_or(0) as usize,
+                            duration_ms: parsed["duration_ms"].as_u64().unwrap_or(0),
+                            tool: parsed["tool"].as_str().unwrap_or("").to_string(),
+                            input_summary: parsed["input_summary"].as_str().unwrap_or("").to_string(),
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+        results
+    }
+
+    /// 用框架执行一批任务（构建图 + invoke_parallel）
+    async fn run_batch_with_framework(
+        config: &Config,
+        task: &str,
+        batch: &[AgentTask],
+        context: &[AgentExecResult],
+        rag_context: &str,
+    ) -> Result<Vec<AgentExecResult>, GraphDemoError> {
+        let ctx: String = context.iter()
+            .map(|r| format!("【{}】\n{}", r.task_name, r.output))
+            .collect::<Vec<_>>().join("\n\n");
+        let rag = if rag_context.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n知识库检索结果：\n{}", rag_context)
+        };
+
+        let compiled = Self::build_batch_graph(
+            config.clone(),
+            task.to_string(),
+            batch.to_vec(),
+            ctx,
+            rag,
+        )?;
+
+        let initial = AgentState::new(task.to_string());
+        let invocation = compiled.invoke_parallel(initial).await
+            .map_err(|e| GraphDemoError::ExecutionError(e.to_string()))?;
+
+        Ok(Self::extract_results(&invocation))
+    }
+
     /// ── 开始执行（返回第一批结果 + session_id） ──
+    /// 使用框架 invoke_parallel 并行执行第一批就绪任务
     pub async fn execute_batch_start(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String) -> Result<(String, Vec<AgentExecResult>, bool), GraphDemoError> {
         let sid = Uuid::new_v4().to_string();
         let done: HashSet<String> = HashSet::new();
         let batch = Self::ready_batch(&agent_tasks, &done);
         if batch.is_empty() { return Err(GraphDemoError::BuildError("没有可执行的任务".into())); }
 
-        let results = Self::run_batch(config, &task, &batch, &[], &rag_context).await?;
+        let results = Self::run_batch_with_framework(config, &task, &batch, &[], &rag_context).await?;
         let completed_names: HashSet<String> = results.iter().map(|r| r.task_name.clone()).collect();
 
         let has_more = {
@@ -105,6 +324,7 @@ impl AgentEngine {
     }
 
     /// ── 下一批 ──
+    /// 使用框架 invoke_parallel 并行执行下一批就绪任务
     pub async fn execute_batch_next(config: &Config, sid: &str) -> Result<(Vec<AgentExecResult>, bool), GraphDemoError> {
         let (task, all, done_names, rag_context) = {
             let g = store().lock().unwrap();
@@ -120,7 +340,7 @@ impl AgentEngine {
             let g = store().lock().unwrap();
             g.as_ref().unwrap().get(sid).map(|s| s.done.clone()).unwrap_or_default()
         };
-        let results = Self::run_batch(config, &task, &batch, &context, &rag_context).await?;
+        let results = Self::run_batch_with_framework(config, &task, &batch, &context, &rag_context).await?;
         let has_more;
         {
             let mut g = store().lock().unwrap();
@@ -135,182 +355,25 @@ impl AgentEngine {
         Ok((results, has_more))
     }
 
-    /// ── 执行一批任务，传上下文 ──
-    async fn run_batch(config: &Config, task: &str, batch: &[AgentTask], context: &[AgentExecResult], rag_context: &str) -> Result<Vec<AgentExecResult>, GraphDemoError> {
-        let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(512));
-        let ctx: String = context.iter().map(|r| format!("【{}】\n{}", r.task_name, r.output)).collect::<Vec<_>>().join("\n\n");
-        let rag_section = if rag_context.is_empty() { String::new() } else { format!("\n\n知识库检索结果：\n{}", rag_context) };
-
-        // 天气查询（用 wttr.in，免费无需 Key）
-        async fn query_weather(city: &str) -> Result<String, String> {
-            let e: String = city.chars().map(|c| match c { 'A'..='Z'|'a'..='z'|'0'..='9'|'-'|'_'|'.'|'~' => c.to_string(), _ => format!("%{:02X}",c as u8) }).collect();
-            reqwest::get(&format!("https://wttr.in/{}?format=%C+|+%t+|+%h+|+%w&lang=zh", e)).await
-                .map_err(|e| e.to_string())?.text().await.map_err(|e| e.to_string())
-        }
-
-        let mut results = Vec::new();
-        for at in batch {
-            let start = Instant::now();
-
-            let (output, tokens) = match at.tool.as_str() {
-                "web_search" => {
-                    let p = format!("任务：{}\n当前子任务：{}\n\n请基于你的知识回答。{}", task, at.description, rag_section);
-                    let resp = llm.invoke(vec![Message::human(&p)], None).await;
-                    match resp {
-                        Ok(r) => {
-                            let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or_else(|| estimate_token_usage(&p, &r.content));
-                            (r.content.clone(), t)
-                        }
-                        Err(e) => (format!("执行失败: {}", e), 0),
-                    }
-                }
-                "weather" => {
-                    let city_prompt = format!("任务：{}\n当前子任务：{}\n\n请输出要查询天气的城市名，不要多余内容。", task, at.description);
-                    let city = llm.invoke(vec![Message::human(&city_prompt)], None).await
-                        .map(|r| r.content.trim().to_string())
-                        .unwrap_or_else(|_| at.description.clone());
-                    match query_weather(&city).await {
-                        Ok(r) => (format!("{}的天气：{}", city, r), 0),
-                        Err(e) => (format!("天气查询失败: {}", e), 0),
-                    }
-                }
-                "rag_search" => {
-                    // Embedding API 按 token 计费，查询文本也消耗 token
-                    let embed_tokens = at.input_template.chars().count().max(1);
-                    if rag_context.is_empty() {
-                        (format!("知识库中未找到相关文档（Embedding 消耗 ~{} tokens）", embed_tokens), embed_tokens)
-                    } else {
-                        (format!("知识库检索到以下相关信息（Embedding 消耗 ~{} tokens）：\n\n{}", embed_tokens, rag_context), embed_tokens)
-                    }
-                }
-                "llm_query" | "" => {
-                    let p = format!("任务：{}\n当前子任务：{}\n\n前置完成的任务结果：\n{}\n\n请基于前置结果执行当前子任务并输出。{}", task, at.description, if ctx.is_empty() { "无" } else { &ctx }, rag_section);
-                    let resp = tokio::time::timeout(Duration::from_secs(120), llm.invoke(vec![Message::human(&p)], None)).await;
-                    match resp {
-                        Ok(Ok(r)) => {
-                            let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or_else(|| estimate_token_usage(&p, &r.content));
-                            (r.content.clone(), t)
-                        }
-                        _ => ("执行失败".to_string(), 0),
-                    }
-                }
-                _ => {
-                    let p = format!("任务：{}\n子任务：{}\n(工具:{} 不可用，请直接用 LLM 执行)\n\n上下文：\n{}\n\n输出结果。{}", task, at.description, at.tool, if ctx.is_empty() { "无" } else { &ctx }, rag_section);
-                    let resp = llm.invoke(vec![Message::human(&p)], None).await;
-                    match resp {
-                        Ok(r) => {
-                            let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or_else(|| estimate_token_usage(&p, &r.content));
-                            (r.content.clone(), t)
-                        }
-                        Err(e) => (format!("执行失败: {}", e), 0),
-                    }
-                }
-            };
-
-            results.push(AgentExecResult {
-                task_name: at.name.clone(), tool: at.tool.clone(), input_summary: at.input_template.clone(),
-                output, duration_ms: start.elapsed().as_millis() as u64, tokens,
-            });
-        }
-        Ok(results)
-    }
-
-    /// ── 按依赖分批并行执行：同批任务 spawn 并行，不同批串行 ──
+    /// ── 按依赖分批并行执行：同批任务 invoke_parallel 并行，不同批串行 ──
     /// 例: A → [B, C] → D  => 第一批: A, 第二批: B+C(并行), 第三批: D
     pub async fn execute_all_batches(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String) -> Result<AgentExecResponse, GraphDemoError> {
         let total_start = Instant::now();
-        let rag_section = if rag_context.is_empty() { String::new() } else { format!("\n\n知识库检索结果：\n{}", rag_context) };
-
-        async fn query_weather(city: &str) -> Result<String, String> {
-            let e: String = city.chars().map(|c| match c { 'A'..='Z'|'a'..='z'|'0'..='9'|'-'|'_'|'.'|'~' => c.to_string(), _ => format!("%{:02X}",c as u8) }).collect();
-            reqwest::get(&format!("https://wttr.in/{}?format=%C+|+%t+|+%h+|+%w&lang=zh", e)).await
-                .map_err(|e| e.to_string())?.text().await.map_err(|e| e.to_string())
-        }
 
         let mut done: HashSet<String> = HashSet::new();
         let mut all_results: Vec<AgentExecResult> = Vec::new();
 
-        // ★ 持续一批一批处理，直到所有任务完成
         while done.len() < agent_tasks.len() {
             let batch = Self::ready_batch(&agent_tasks, &done);
             if batch.is_empty() {
-                break; // 没有可执行任务了（可能循环依赖）
+                break;
             }
 
-            // 前置结果做上下文（与 run_batch 一致）
-            let ctx: String = all_results.iter()
-                .map(|r| format!("【{}】\n{}", r.task_name, r.output))
-                .collect::<Vec<_>>().join("\n\n");
+            let results = Self::run_batch_with_framework(config, &task, &batch, &all_results, &rag_context).await?;
 
-            // ★ 本批任务全部 spawn 并行执行
-            let mut handles = Vec::new();
-            for at in batch {
-                let config = config.clone();
-                let task = task.clone();
-                let rag = rag_section.clone();
-                let ctx = ctx.clone();
-
-                let handle = tokio::spawn(async move {
-        let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(2048));
-                    let task_start = Instant::now();
-                    let (output, tokens) = match at.tool.as_str() {
-                        "llm_query" | "" => {
-                            let p = if ctx.is_empty() {
-                                format!("任务：{}\n当前子任务：{}\n\n请执行当前子任务并输出结果。{}", task, at.description, rag)
-                            } else {
-                                format!("任务：{}\n当前子任务：{}\n\n前置完成的任务结果：\n{}\n\n请基于前置结果执行当前子任务并输出。{}",
-                                    task, at.description, ctx, rag)
-                            };
-                            match tokio::time::timeout(Duration::from_secs(120), llm.invoke(vec![Message::human(&p)], None)).await {
-                                Ok(Ok(r)) => (r.content.clone(), r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0)),
-                                _ => ("执行失败".to_string(), 0),
-                            }
-                        }
-                        "weather" => {
-                            let city_prompt = format!("任务：{}\n当前子任务：{}\n\n请输出要查询天气的城市名，不要多余内容。", task, at.description);
-                            let llm2 = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(512));
-                            let city = llm2.invoke(vec![Message::human(&city_prompt)], None).await
-                                .map(|r| r.content.trim().to_string())
-                                .unwrap_or_else(|_| at.description.clone());
-                            match query_weather(&city).await {
-                                Ok(r) => (format!("{}的天气：{}", city, r), 0),
-                                Err(e) => (format!("天气查询失败: {}", e), 0),
-                            }
-                        }
-                        "rag_search" => {
-                            if rag.is_empty() {
-                                ("知识库中未找到相关文档，请基于自身知识回答。".to_string(), 0)
-                            } else {
-                                (format!("知识库检索到以下相关信息：\n\n{}", rag), 0)
-                            }
-                        }
-                        _ => {
-                            let p = format!("任务：{}\n子任务：{}\n(工具:{} 不可用，请直接用 LLM 执行)\n\n输出结果。{}", task, at.description, at.tool, rag);
-                            match llm.invoke(vec![Message::human(&p)], None).await {
-                                Ok(r) => (r.content.clone(), r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0)),
-                                Err(e) => (format!("执行失败: {}", e), 0),
-                            }
-                        }
-                    };
-                    let elapsed = task_start.elapsed().as_millis() as u64;
-                    AgentExecResult {
-                        task_name: at.name,
-                        tool: at.tool,
-                        input_summary: at.input_template,
-                        output,
-                        duration_ms: elapsed,
-                        tokens,
-                    }
-                });
-                handles.push(handle);
-            }
-
-            // ★ 等本批全部完成，加入已完成集合
-            for handle in handles {
-                let result = handle.await
-                    .map_err(|e| GraphDemoError::ExecutionError(format!("任务崩溃: {}", e)))?;
-                done.insert(result.task_name.clone());
-                all_results.push(result);
+            for r in &results {
+                done.insert(r.task_name.clone());
+                all_results.push(r.clone());
             }
         }
 
@@ -355,13 +418,6 @@ impl AgentEngine {
         }
         Self::batch_finalize(&sid).await
     }
-}
-
-/// 当 API 不返回 token_usage 时，用文本长度估算 token 数
-fn estimate_token_usage(prompt: &str, response: &str) -> usize {
-    let input_tokens = prompt.chars().count() / 2 + 1;
-    let output_tokens = response.chars().count() / 2 + 1;
-    input_tokens + output_tokens
 }
 
 #[cfg(test)]
@@ -434,7 +490,7 @@ mod tests {
 
         let sid = uuid::Uuid::new_v4().to_string();
         store().lock().unwrap().get_or_insert_with(HashMap::new).insert(sid.clone(), BatchState {
-            task, all, done, completed_names: completed, start: Instant::now(),
+            task, all, done, completed_names: completed, start: Instant::now(), rag_context: String::new(),
         });
 
         // 验证存储和读取
@@ -443,5 +499,120 @@ mod tests {
         let s = m.get(&sid).unwrap();
         assert_eq!(s.completed_names.len(), 1);
         assert!(s.completed_names.contains("A"));
+    }
+
+    // ──────── 框架集成测试 ────────
+
+    /// 测试 build_batch_graph 能正确编译不同大小的批次
+    #[test]
+    fn test_build_batch_graph_compiles() {
+        let config = Config::load().expect("需要 config.toml 才能运行此测试");
+
+        // 单任务
+        let batch1 = vec![make_task("A", vec![])];
+        let graph1 = AgentEngine::build_batch_graph(config.clone(), "test".into(), batch1, String::new(), String::new());
+        assert!(graph1.is_ok(), "单任务批次应该编译成功");
+        let compiled = graph1.unwrap();
+        let nodes = compiled.node_names();
+        assert!(nodes.contains(&"A".to_string()));
+        assert!(nodes.contains(&"__dispatch__".to_string()));
+
+        // 多任务
+        let batch2 = vec![make_task("A", vec![]), make_task("B", vec![]), make_task("C", vec![])];
+        let graph2 = AgentEngine::build_batch_graph(config, "test".into(), batch2, String::new(), String::new());
+        assert!(graph2.is_ok(), "多任务批次应该编译成功");
+        let compiled2 = graph2.unwrap();
+        assert_eq!(compiled2.node_names().len(), 4); // dispatch + A + B + C
+        assert_eq!(compiled2.entry_point(), "__dispatch__");
+    }
+
+    /// 测试 extract_results 能从 ParallelInvocation 正确提取结果
+    #[test]
+    fn test_extract_results_parses_correctly() {
+        use langchainrust::langgraph::ParallelBranch;
+
+        // 构造一个模拟的 ParallelInvocation
+        let mut branch_a = AgentState::new("test".into());
+        branch_a.add_message(MessageEntry::ai(
+            serde_json::json!({
+                "task": "任务A",
+                "output": "结果A",
+                "tokens": 100,
+                "duration_ms": 500,
+                "tool": "llm_query",
+                "input_summary": "",
+            }).to_string()
+        ));
+        branch_a.set_output("结果A".into());
+
+        let mut branch_b = AgentState::new("test".into());
+        branch_b.add_message(MessageEntry::ai(
+            serde_json::json!({
+                "task": "任务B",
+                "output": "结果B",
+                "tokens": 200,
+                "duration_ms": 800,
+                "tool": "llm_query",
+                "input_summary": "",
+            }).to_string()
+        ));
+        branch_b.set_output("结果B".into());
+
+        let invocation = ParallelInvocation {
+            final_state: AgentState::new("test".into()),
+            steps: vec![],
+            recursion_count: 1,
+            parallel_branches: vec![
+                ParallelBranch {
+                    name: "任务A".into(),
+                    final_state: branch_a,
+                    steps: vec![],
+                },
+                ParallelBranch {
+                    name: "任务B".into(),
+                    final_state: branch_b,
+                    steps: vec![],
+                },
+            ],
+        };
+
+        let results = AgentEngine::extract_results(&invocation);
+        assert_eq!(results.len(), 2, "应该提取出两个任务的结果");
+
+        let result_a = results.iter().find(|r| r.task_name == "任务A").unwrap();
+        assert_eq!(result_a.output, "结果A");
+        assert_eq!(result_a.tokens, 100);
+        assert_eq!(result_a.duration_ms, 500);
+
+        let result_b = results.iter().find(|r| r.task_name == "任务B").unwrap();
+        assert_eq!(result_b.output, "结果B");
+        assert_eq!(result_b.tokens, 200);
+        assert_eq!(result_b.duration_ms, 800);
+    }
+
+    /// 测试 ready_batch + run_batch_with_framework 的集成
+    /// （不实际调 LLM，只验证框架路径能正确编译）
+    #[test]
+    fn test_framework_integration_compile_only() {
+        let tasks = vec![
+            make_task("A", vec![]),
+            make_task("B", vec![]),
+        ];
+
+        // 验证分批逻辑
+        let done: HashSet<String> = HashSet::new();
+        let batch = AgentEngine::ready_batch(&tasks, &done);
+        assert_eq!(batch.len(), 2, "无依赖任务应该全部就绪");
+
+        // 验证 build_batch_graph 能处理这批任务
+        let config = Config::load().expect("需要 config.toml 才能运行此测试");
+        let graph = AgentEngine::build_batch_graph(
+            config,
+            "test".into(),
+            batch,
+            String::new(),
+            String::new(),
+        );
+        assert!(graph.is_ok(), "批次图应该编译成功");
     }
 }
