@@ -1651,7 +1651,7 @@ async function runAgentPlan() {
     try {
         const res = await fetch(`${API_BASE}/agent/plan`, {
             method: 'POST', headers: {'Content-Type':'application/json'},
-            body: JSON.stringify({task, use_rag: document.getElementById('agent-rag-toggle').checked})
+            body: JSON.stringify({task, use_rag: document.getElementById('agent-rag-toggle').checked, use_routing: document.getElementById('agent-routing-toggle').checked})
         });
         if (!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.error||`${res.status}`); }
         const data = await res.json();
