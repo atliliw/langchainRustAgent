@@ -774,7 +774,7 @@ function typeWriterEffect(assistantDiv, messagesDiv) {
     window.typewriterQueue = window.typewriterQueue.substring(charsToShow);
     assistantDiv.innerHTML = `<div>${escapeHtml(displayedText)}<span class="streaming">▊</span></div>`;
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    const delay = charsToShow > 0 && window.typewriterQueue.length > 20 ? 20 : 30;
+    const delay = window.typewriterQueue.length > 50 ? 15 : 60;
     setTimeout(() => typeWriterEffect(assistantDiv, messagesDiv), delay);
 }
 
@@ -1240,6 +1240,8 @@ const LG_MODE = {
     parallel: { name: '并行执行', color: '#667eea', desc: 'FanOut → 3个任务同时跑' },
     conditional: { name: '条件路由', color: '#f5576c', desc: '根据输入长度动态选路径' },
     stream: { name: '流式执行', color: '#4facfe', desc: 'step1→step2→step3 逐步执行' },
+    subgraph: { name: '子图', color: '#059669', desc: '子图嵌套：父图生成→子图审核' },
+    llm_conditional: { name: 'LLM 路由', color: '#d97706', desc: 'LLM 判断意图，动态路由' },
 };
 
 async function showLangGraphStructure(mode) {
@@ -1254,19 +1256,61 @@ async function showLangGraphStructure(mode) {
     viz.style.display = 'block';
 
     try {
-        const [strucRes, execRes] = await Promise.all([
-            fetch(`${API_BASE}/langgraph/structure`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ mode })
-            }),
-            fetch(`${API_BASE}/langgraph/${mode}`, {
+        let execData;
+        let strucData;
+
+        if (mode === 'subgraph') {
+            execData = await fetch(`${API_BASE}/langgraph/subgraph`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ input })
-            }),
-        ]);
-
-        const strucData = await strucRes.json();
-        const execData = await execRes.json();
+            }).then(r => r.json());
+            // 子图用硬编码图结构（框架不支持动态获取子图 mermaid）
+            strucData = {
+                structure: {
+                    entry_point: '生成内容',
+                    nodes: ['生成内容', '质量审核(子图)'],
+                    edges: [
+                        { type: 'fixed', source: '__start__', target: '生成内容' },
+                        { type: 'fixed', source: '生成内容', target: '质量审核(子图)' },
+                        { type: 'fixed', source: '质量审核(子图)', target: '__end__' },
+                    ],
+                    routers: []
+                }
+            };
+        } else if (mode === 'llm_conditional') {
+            execData = await fetch(`${API_BASE}/langgraph/llm_conditional`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ input })
+            }).then(r => r.json());
+            strucData = {
+                structure: {
+                    entry_point: '分析意图',
+                    nodes: ['分析意图', '技术回答', '通用回答', '兜底回答'],
+                    edges: [
+                        { type: 'fixed', source: '__start__', target: '分析意图' },
+                        { type: 'conditional', source: '分析意图', router: 'llm_intent_router',
+                          targets: { tech: '技术回答', general: '通用回答', other: '兜底回答' }, default: '兜底回答' },
+                        { type: 'fixed', source: '技术回答', target: '__end__' },
+                        { type: 'fixed', source: '通用回答', target: '__end__' },
+                        { type: 'fixed', source: '兜底回答', target: '__end__' },
+                    ],
+                    routers: ['llm_intent_router']
+                }
+            };
+        } else {
+            const [strucRes, exec] = await Promise.all([
+                fetch(`${API_BASE}/langgraph/structure`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode })
+                }),
+                fetch(`${API_BASE}/langgraph/${mode}`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ input })
+                }),
+            ]);
+            strucData = await strucRes.json();
+            execData = await exec.json();
+        }
 
         const annotations = buildAnnotations(mode, execData);
         container.innerHTML = renderGraphHtml(strucData.structure, annotations);
@@ -1282,7 +1326,7 @@ function buildAnnotations(mode, data) {
         const taskMap = { 'TaskA': 'task_a', 'TaskB': 'task_b', 'TaskC': 'task_c' };
         (data.parallel_tasks || []).forEach(t => {
             const nodeName = taskMap[t.task_name] || t.task_name.toLowerCase();
-            ann[nodeName] = { label: t.result, ms: t.duration_ms };
+            ann[nodeName] = { label: t.result.substring(0,30), ms: t.duration_ms };
         });
         ann['dispatcher'] = { label: '将任务分发给 3 个并行节点', ms: 0 };
     } else if (mode === 'conditional') {
@@ -1295,6 +1339,14 @@ function buildAnnotations(mode, data) {
                 ann[e.node_name] = { label: `执行中`, ms: e.timestamp_ms };
             }
         });
+    } else if (mode === 'subgraph') {
+        ann['生成内容'] = { label: data.generated_content.substring(0,30), ms: 0 };
+        ann['质量审核(子图)'] = { label: data.review_result.substring(0,30), ms: 0 };
+    } else if (mode === 'llm_conditional') {
+        ann['分析意图'] = { label: `输入: ${data.input}`, ms: 0 };
+        if (data.route_taken) {
+            ann[data.route_taken] = { label: data.output.substring(0,30), ms: 0 };
+        }
     }
     return ann;
 }
@@ -1335,6 +1387,30 @@ function renderExecResults(mode, data) {
                     <td style="padding:8px;border:1px solid #e2e8f0;">${e.timestamp_ms}</td>
                 </tr>`).join('')}</tbody>
             </table>
+        </div>`;
+    } else if (mode === 'subgraph') {
+        html += `<div style="border:1px solid #e2e8f0;padding:15px;border-radius:8px;">
+            <p><strong>输入：</strong>${escapeHtml(data.input)}</p>
+            <p><strong>生成内容：</strong>${escapeHtml(data.generated_content)}</p>
+            <p><strong>审核结果：</strong>${escapeHtml(data.review_result)}</p>
+            <p><strong>总耗时：</strong>${data.total_duration_ms}ms</p>
+            <div style="background:#f1f5f9;padding:10px;border-radius:6px;font-size:12px;margin-top:10px;">
+                <strong>💡 关键点：</strong>子图有自己的状态类型（ReviewState），
+                通过 input_mapper/output_mapper 与父图（AgentState）互相转换。
+                父图和子图可以各自维护独立的状态。
+            </div>
+        </div>`;
+    } else if (mode === 'llm_conditional') {
+        html += `<div style="border:1px solid #e2e8f0;padding:15px;border-radius:8px;">
+            <p><strong>输入：</strong>${escapeHtml(data.input)}</p>
+            <p><strong>LLM 判断路由：</strong>${escapeHtml(data.route_taken)}</p>
+            <p><strong>输出：</strong>${escapeHtml(data.output)}</p>
+            <p><strong>总耗时：</strong>${data.total_duration_ms}ms</p>
+            <div style="background:#f1f5f9;padding:10px;border-radius:6px;font-size:12px;margin-top:10px;">
+                <strong>💡 关键点：</strong>不是用固定规则判断路由，
+                而是调 LLM 分析问题意图，根据 LLM 返回动态选择路径。
+                这是"真 Agent"和"固定流水线"的分水岭。
+            </div>
         </div>`;
     }
     return html;

@@ -19,14 +19,17 @@ use crate::models::*;
 
 use langchainrust::{
     StateGraph, GraphBuilder, START, END,
-    AgentState, StateUpdate,
+    AgentState, StateUpdate, StateSchema,
+    MessageEntry, ExecutionStep,
     FunctionRouter,
     StreamEvent,
     CompiledGraph,
+    SubgraphNode,
     language_models::OpenAIChat,
     schema::Message,
     core::runnables::Runnable,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -497,6 +500,212 @@ impl LangGraphDemoService {
             original_task: task,
             sub_tasks,
             graph_structure: compiled.visualize_json(),
+        })
+    }
+
+    /// ──────────────────── 模式4：子图演示 ────────────────────
+    ///
+    /// 子图 = 把一个小图包装成节点，嵌到父图里
+    /// 这里演示：
+    ///   父图：生成内容 → 子图(质量审核) → 输出
+    ///   子图：审核 → 决定(通过/需修改) → 结束
+    ///
+    /// 子图和父图可以使用不同的状态类型
+    pub async fn run_subgraph_demo(input: String) -> Result<SubgraphDemoResult, GraphDemoError> {
+        let total_start = Instant::now();
+
+        // ── 1. 定义子图的状态类型（不同于父图的 AgentState） ──
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct ReviewState {
+            content: String,
+            review_result: String,
+            decision: String,
+        }
+        impl StateSchema for ReviewState {}
+
+        // ── 2. 构建子图 ──
+        let mut sub = StateGraph::<ReviewState>::new();
+        sub.add_node_fn("审核内容", |state| {
+            let mut s = state.clone();
+            s.review_result = format!("审核通过：内容长度 {} 字，符合要求", state.content.len());
+            s.decision = if state.content.len() > 5 { "通过".into() } else { "需修改".into() };
+            Ok(StateUpdate::full(s))
+        });
+        sub.add_node_fn("输出结果", |state| Ok(StateUpdate::full(state.clone())));
+        sub.add_edge(START, "审核内容");
+        sub.add_edge("审核内容", "输出结果");
+        sub.add_edge("输出结果", END);
+        let compiled_sub = sub.compile()
+            .map_err(|e| GraphDemoError::BuildError(e.to_string()))?;
+
+        // ── 3. 构建父图 ──
+        let mut parent = StateGraph::<AgentState>::new();
+        parent.add_node_fn("生成内容", |state| {
+            let mut s = state.clone();
+            let content = format!("这是一篇关于「{}」的文章...", state.input);
+            s.add_message(MessageEntry::ai(content.clone()));
+            s.output = Some(content);
+            Ok(StateUpdate::full(s))
+        });
+
+        // 把子图作为一个节点嵌入父图
+        parent.add_subgraph(
+            "质量审核",
+            compiled_sub,
+            // 父状态 → 子状态
+            |parent_state: &AgentState| -> ReviewState {
+                ReviewState {
+                    content: parent_state.output.clone().unwrap_or_default(),
+                    review_result: String::new(),
+                    decision: String::new(),
+                }
+            },
+            // 子状态 → 父状态
+            |sub_state: &ReviewState, parent_state: &mut AgentState| {
+                parent_state.add_message(MessageEntry::ai(
+                    format!("审核结果：{} | 决定：{}", sub_state.review_result, sub_state.decision)
+                ));
+            },
+        );
+
+        parent.add_edge(START, "生成内容");
+        parent.add_edge("生成内容", "质量审核");
+        parent.add_edge("质量审核", END);
+
+        let compiled_parent = parent.compile()
+            .map_err(|e| GraphDemoError::BuildError(e.to_string()))?;
+
+        // ── 4. 执行父图 ──
+        let initial = AgentState::new(input.clone());
+        let result = compiled_parent.invoke(initial).await
+            .map_err(|e| GraphDemoError::ExecutionError(e.to_string()))?;
+
+        let total_ms = total_start.elapsed().as_millis() as u64;
+
+        // 从消息中提取审核结果
+        let review_msg = result.final_state.messages.iter()
+            .find(|m| m.content.contains("审核结果"))
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+
+        let content_msg = result.final_state.messages.iter()
+            .find(|m| m.content.contains("这是一篇关于"))
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+
+        Ok(SubgraphDemoResult {
+            input,
+            generated_content: content_msg,
+            review_result: review_msg,
+            total_duration_ms: total_ms,
+        })
+    }
+
+    /// ──────────────────── 模式5：LLM 条件路由演示 ────────────────────
+    ///
+    /// 不是用固定规则（如 input.len() < 10），而是用 LLM 判断意图来决定路由
+    ///
+    /// 流程：
+    ///   START → 分析意图 → [LLM 判断路由] ─┬─ "tech" → 技术回答
+    ///                                       ├─ "general" → 通用回答
+    ///                                       └─ "other" → 兜底回答
+    pub async fn run_llm_conditional_demo(
+        config: &Config,
+        input: String,
+    ) -> Result<LLMConditionalResult, GraphDemoError> {
+        let total_start = Instant::now();
+
+        let mut graph: StateGraph<AgentState> = StateGraph::new();
+
+        // 分析意图节点
+        graph.add_node_fn("分析意图", |state| {
+            let mut s = state.clone();
+            s.add_message(MessageEntry::ai(format!("分析输入：{}", state.input)));
+            Ok(StateUpdate::full(s))
+        });
+
+        // 三个回答节点（只保留一个，由路由决定）
+        graph.add_node_fn("技术回答", |state| {
+            let mut s = state.clone();
+            s.set_output(format!("【技术解答】{} —— 从技术角度详细解释...", state.input));
+            Ok(StateUpdate::full(s))
+        });
+        graph.add_node_fn("通用回答", |state| {
+            let mut s = state.clone();
+            s.set_output(format!("【通用回答】{} —— 用通俗易懂的方式解释...", state.input));
+            Ok(StateUpdate::full(s))
+        });
+        graph.add_node_fn("兜底回答", |state| {
+            let mut s = state.clone();
+            s.set_output(format!("【其他】关于「{}」, 这是一个未分类的问题", state.input));
+            Ok(StateUpdate::full(s))
+        });
+
+        graph.add_edge(START, "分析意图");
+
+        // 条件路由 — 用 LLM 判断意图
+        let targets = HashMap::from([
+            ("tech".to_string(), "技术回答".to_string()),
+            ("general".to_string(), "通用回答".to_string()),
+            ("other".to_string(), "兜底回答".to_string()),
+        ]);
+        graph.add_conditional_edges("分析意图", "llm_intent_router", targets, Some("兜底回答".to_string()));
+
+        // LLM 路由函数
+        let config_for_router = config.clone();
+        let router = FunctionRouter::new(move |state: &AgentState| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let llm = OpenAIChat::new(
+                    config_for_router.to_langchain_openai_config().with_max_tokens(50)
+                );
+                let prompt = format!(
+                    "判断以下问题属于哪个类别，只返回一个词：tech（技术问题）、general（通用知识）、other（其他）。\n问题：{}",
+                    state.input
+                );
+                match llm.invoke(vec![Message::human(&prompt)], None).await {
+                    Ok(r) => {
+                        let answer = r.content.trim().to_lowercase();
+                        if answer.contains("tech") { "tech" }
+                        else if answer.contains("general") { "general" }
+                        else { "other" }
+                    }
+                    Err(_) => "other",
+                }.to_string()
+            })
+        });
+        graph.set_conditional_router("llm_intent_router", router);
+
+        graph.add_edge("技术回答", END);
+        graph.add_edge("通用回答", END);
+        graph.add_edge("兜底回答", END);
+
+        let compiled = graph.compile()
+            .map_err(|e| GraphDemoError::BuildError(e.to_string()))?;
+
+        let initial = AgentState::new(input.clone());
+        let result = compiled.invoke(initial).await
+            .map_err(|e| GraphDemoError::ExecutionError(e.to_string()))?;
+
+        // 通过在 stpes 中找路由后的节点来判断走了哪条路
+        let route_taken = result.steps.iter()
+            .find_map(|s| match s {
+                langchainrust::ExecutionStep::Node { name, .. } => {
+                    if name != "分析意图" && name != START && name != END {
+                        Some(name.clone())
+                    } else { None }
+                }
+                _ => None,
+            }).unwrap_or_default();
+
+        let total_ms = total_start.elapsed().as_millis() as u64;
+
+        Ok(LLMConditionalResult {
+            input,
+            route_taken,
+            output: result.final_state.output.unwrap_or_default(),
+            steps: result.final_state.messages.iter().map(|m| m.content.clone()).collect(),
+            total_duration_ms: total_ms,
         })
     }
 

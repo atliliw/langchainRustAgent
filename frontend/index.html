@@ -179,10 +179,12 @@
             <div style="margin-bottom: 15px;">
                 <h4 style="color:#64748b;margin-bottom:8px;">🎯 演示模式（固定结构）</h4>
                 <input type="text" id="langgraph-input" value="测试输入" style="width: 300px; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-top: 10px;">
+                <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 15px; margin-top: 10px;">
                     <button class="btn" onclick="showLangGraphStructure('parallel')" style="background: linear-gradient(135deg, #667eea, #764ba2);">🔀 并行执行</button>
                     <button class="btn" onclick="showLangGraphStructure('conditional')" style="background: linear-gradient(135deg, #f093fb, #f5576c);">🔀 条件路由</button>
                     <button class="btn" onclick="showLangGraphStructure('stream')" style="background: linear-gradient(135deg, #4facfe, #00f2fe);">▶️ 流式执行</button>
+                    <button class="btn" onclick="showLangGraphStructure('subgraph')" style="background: linear-gradient(135deg, #34d399, #059669);">📦 子图</button>
+                    <button class="btn" onclick="showLangGraphStructure('llm_conditional')" style="background: linear-gradient(135deg, #f59e0b, #d97706);">🤖 LLM 路由</button>
                 </div>
             </div>
             

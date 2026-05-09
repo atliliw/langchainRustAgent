@@ -123,6 +123,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/langgraph/structure", axum::routing::post(langgraph::get_langgraph_structure))
         // 获取图结构（含 Mermaid 可视化语法）
         
+        .route("/api/langgraph/subgraph", axum::routing::post(langgraph::run_langgraph_subgraph))
+        // 子图演示
+        
+        .route("/api/langgraph/llm_conditional", axum::routing::post(langgraph::run_langgraph_llm_conditional))
+        // LLM 条件路由演示
+        
         .route("/api/langgraph/decompose", axum::routing::post(langgraph::decompose_task))
         // AI 任务拆解（LLM 拆解 + 建图，不执行）
         

@@ -85,6 +85,25 @@ pub struct ParallelTaskResult {
     pub duration_ms: u64,
 }
 
+/// 子图演示结果
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SubgraphDemoResult {
+    pub input: String,
+    pub generated_content: String,
+    pub review_result: String,
+    pub total_duration_ms: u64,
+}
+
+/// LLM 条件路由结果
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LLMConditionalResult {
+    pub input: String,
+    pub route_taken: String,
+    pub output: String,
+    pub steps: Vec<String>,
+    pub total_duration_ms: u64,
+}
+
 /// 条件路由结果
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConditionalDemoResult {

@@ -65,6 +65,28 @@ pub async fn get_langgraph_structure(
     Ok(Json(result))
 }
 
+/// 子图演示
+/// POST /api/langgraph/subgraph
+pub async fn run_langgraph_subgraph(
+    Json(request): Json<LangGraphRequest>,
+) -> Result<Json<SubgraphDemoResult>, ApiErrorResponse> {
+    let result = crate::services::LangGraphDemoService::run_subgraph_demo(request.input).await
+        .map_err(|e| ApiErrorResponse(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(result))
+}
+
+/// LLM 条件路由演示
+/// POST /api/langgraph/llm_conditional
+pub async fn run_langgraph_llm_conditional(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<LangGraphRequest>,
+) -> Result<Json<LLMConditionalResult>, ApiErrorResponse> {
+    let result = crate::services::LangGraphDemoService::run_llm_conditional_demo(
+        &state.config, request.input,
+    ).await.map_err(|e| ApiErrorResponse(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(result))
+}
+
 /// AI 任务拆解（不含执行）
 /// POST /api/langgraph/decompose
 /// 请求: { task: "用户任务" }
