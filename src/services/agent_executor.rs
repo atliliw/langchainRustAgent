@@ -52,17 +52,6 @@ impl AgentEngine {
     pub async fn plan(config: &Config, task: String, rag_context: String, use_rag: bool, use_routing: bool) -> Result<AgentPlan, GraphDemoError> {
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
         let tj = AVAILABLE_TOOLS.iter().map(|(n,d)| format!("{{\"name\":\"{}\",\"description\":\"{}\"}}",n,d)).collect::<Vec<_>>().join(",");
-
-        let routing_instructions = if use_routing {
-            "\n决策节点说明：\n\
-             如果某些步骤需要根据中间结果判断下一步走向，可以创建 type=decision 的节点。\n\
-             决策节点不分配 tool，通过 routes 字段定义不同走向。\n\
-             routes 的 key 是决策结果，value 是对应的后续任务名。\n\
-             示例：判断信息是否充分 → routes: {\"充分\":\"写报告\", \"不充分\":\"补充搜索\"}\n"
-        } else {
-            "\n所有任务的 type 默认为 normal，按 depends_on 顺序执行。\n"
-        };
-
         let p = if use_rag {
             let rag_context_block = if rag_context.is_empty() {
                 String::new()
@@ -71,41 +60,103 @@ impl AgentEngine {
             };
             format!(
                 "第一个子任务必须是「知识库检索」，使用 rag_search 工具。后续子任务基于知识库检索的结果执行。{rag}\n\
-                 将任务拆解为2-5个子任务并分配工具。{routing}\
-                 要求：\n\
-                 1. 对比类任务（如比较A和B）必须将A和B拆成独立的搜索/调研子任务，depends_on 为空，以便并行执行\n\
-                 2. 每个子任务职责单一，不要合并多个不同的工作\n\
-                 3. 最终汇总/分析任务 depends_on 前置的所有搜索任务\n\
-                 示例：用户说\"比较go和python\"，应该拆成：\n\
-                   [{{\"name\":\"调研Go\", \"depends_on\":[]}}, {{\"name\":\"调研Python\", \"depends_on\":[]}}, {{\"name\":\"对比分析\", \"depends_on\":[\"调研Go\",\"调研Python\"]}}]\n\
+                 将任务拆解为2-5个子任务并分配工具。\n\
+                 要求：对比类任务必须将A和B拆成独立的搜索任务（depends_on为空），最终汇总任务depends_on所有搜索任务。\n\
                  可用工具：[{tools}]\n\
-                 返回JSON格式：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"task_type\": \"normal\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
+                 返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
                  任务：{task}\n\
-                 只返回JSON。name和description必须用中文。",
-                rag = rag_context_block, routing = routing_instructions, tools = tj, task = task
+                 只返回JSON。",
+                rag = rag_context_block, tools = tj, task = task
             )
         } else {
             format!(
-                "将任务拆解为2-5个子任务并分配工具。{routing}\
-                 要求：\n\
-                 1. 对比类任务（如比较A和B）必须将A和B拆成独立的搜索/调研子任务，depends_on 为空，以便并行执行\n\
-                 2. 每个子任务职责单一，不要合并多个不同的工作\n\
-                 3. 最终汇总/分析任务 depends_on 前置的所有搜索任务\n\
-                 示例：用户说\"比较go和python\"，应该拆成：\n\
-                   [{{\"name\":\"调研Go\", \"depends_on\":[]}}, {{\"name\":\"调研Python\", \"depends_on\":[]}}, {{\"name\":\"对比分析\", \"depends_on\":[\"调研Go\",\"调研Python\"]}}]\n\
+                "将任务拆解为2-5个子任务并分配工具。\n\
+                 要求：对比类任务必须将A和B拆成独立的搜索任务（depends_on为空），最终汇总任务depends_on所有搜索任务。\n\
                  可用工具：[{tools}]\n\
-                 返回JSON格式：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"task_type\": \"normal\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
+                 返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
                  任务：{task}\n\
-                 只返回JSON。name和description必须用中文。",
-                routing = routing_instructions, tools = tj, task = task
+                 只返回JSON。",
+                tools = tj, task = task
             )
         };
         let r = llm.invoke(vec![Message::human(&p)], None).await.map_err(|e| GraphDemoError::ExecutionError(e.to_string()))?;
         let c = r.content.trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
-        let tasks: Vec<AgentTask> = serde_json::from_str(c).map_err(|e| GraphDemoError::BuildError(format!("格式错: {}", e)))?;
+        let mut tasks: Vec<AgentTask> = serde_json::from_str(c).map_err(|e| GraphDemoError::BuildError(format!("格式错: {}", e)))?;
         if tasks.is_empty() { return Err(GraphDemoError::BuildError("规划为空".into())); }
+
+        // 如果启用路由，自动插入决策节点
+        if use_routing {
+            Self::inject_decision_nodes(&mut tasks);
+        }
+
         let gs = Self::build_graph(&tasks);
         Ok(AgentPlan{original_task:task, tasks, graph_structure:gs})
+    }
+
+    /// 自动在调研任务和汇总任务之间插入决策节点
+    fn inject_decision_nodes(tasks: &mut Vec<AgentTask>) {
+        let research_tools = ["rag_search", "web_search"];
+        // 找出所有调研任务名
+        let research_names: HashSet<String> = tasks.iter()
+            .filter(|t| research_tools.contains(&t.tool.as_str()))
+            .map(|t| t.name.clone())
+            .collect();
+
+        // 找出直接依赖调研任务的汇总任务
+        let synthesis_indices: Vec<usize> = tasks.iter().enumerate()
+            .filter(|(_, t)| {
+                t.tool == "llm_query" && t.depends_on.iter().any(|d| research_names.contains(d))
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        // 从后往前插入决策节点（避免索引偏移）
+        for &idx in synthesis_indices.iter().rev() {
+            let synth = &tasks[idx];
+            let deps_on_research: Vec<String> = synth.depends_on.iter()
+                .filter(|d| research_names.contains(d.as_str()))
+                .cloned()
+                .collect();
+
+            let decision_name = format!("判断信息是否充分");
+            let decision = AgentTask {
+                name: decision_name.clone(),
+                description: "基于检索结果判断信息是否满足要求，决定下一步走向".to_string(),
+                tool: String::new(),
+                depends_on: deps_on_research.clone(),
+                input_template: String::new(),
+                task_type: "decision".to_string(),
+                routes: HashMap::from([
+                    ("充分".to_string(), synth.name.clone()),
+                    ("不充分".to_string(), format!("补充搜索")),
+                ]),
+            };
+
+            // 更新汇总任务的依赖：改为依赖决策节点
+            let task = &mut tasks[idx];
+            for d in &deps_on_research {
+                task.depends_on.retain(|x| x != d);
+            }
+            task.depends_on.push(decision_name.clone());
+
+            // 插入补充搜索任务（如果还不存在）
+            let has_supplement = tasks.iter().any(|t| t.name == "补充搜索");
+            if !has_supplement {
+                let supplement = AgentTask {
+                    name: "补充搜索".to_string(),
+                    description: "补充搜索更多信息".to_string(),
+                    tool: "web_search".to_string(),
+                    depends_on: vec![],
+                    input_template: String::new(),
+                    task_type: "normal".to_string(),
+                    routes: HashMap::new(),
+                };
+                tasks.push(supplement);
+            }
+
+            // 插入决策节点
+            tasks.insert(idx, decision);
+        }
     }
 
     fn build_graph(tasks: &[AgentTask]) -> serde_json::Value {
