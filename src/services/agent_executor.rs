@@ -58,11 +58,11 @@ impl AgentEngine {
                 format!("\n\n知识库检索到以下相关信息：\n{}", rag_context)
             };
             format!(
-                "第一个子任务必须是「知识库检索」，使用 rag_search 工具。后续子任务基于知识库检索的结果执行。{rag}\n将任务拆解为2-5个子任务并分配工具。可用工具：[{tools}] 返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}] 任务：{task} 只返回JSON。name和description必须用中文。",
+                "第一个子任务必须是「知识库检索」，使用 rag_search 工具。后续子任务基于知识库检索的结果执行。{rag}\n将任务拆解为2-5个子任务并分配工具。没有依赖关系的子任务可以并行执行（depends_on 为空表示该任务没有前置依赖，可以和其他没有依赖的任务同时执行）。可用工具：[{tools}] 返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}] 任务：{task} 只返回JSON。name和description必须用中文。",
                 rag = rag_context_block, tools = tj, task = task
             )
         } else {
-            format!("将任务拆解为2-5个子任务并分配工具。可用工具：[{tools}] 返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}] 任务：{task} 只返回JSON。name和description必须用中文。", tools = tj, task = task)
+            format!("将任务拆解为2-5个子任务并分配工具。没有依赖关系的子任务可以并行执行（depends_on 为空表示该任务没有前置依赖，可以和其他没有依赖的任务同时执行）。可用工具：[{tools}] 返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}] 任务：{task} 只返回JSON。name和description必须用中文。", tools = tj, task = task)
         };
         let r = llm.invoke(vec![Message::human(&p)], None).await.map_err(|e| GraphDemoError::ExecutionError(e.to_string()))?;
         let c = r.content.trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
