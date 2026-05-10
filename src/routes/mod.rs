@@ -17,9 +17,41 @@
 use crate::handlers::{
     aggregate, chat, document, langgraph, search, stats, test, upload, AppState,
 };
-use axum::Router;
+use axum::{
+    body::Body,
+    extract::State,
+    http::{Request, StatusCode},
+    middleware::{self, Next},
+    response::Response,
+    Router,
+};
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
+
+/// 认证中间件：检查 Authorization: Bearer <key> 头
+async fn auth_middleware(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let api_key = &state.config.auth.api_key;
+
+    if api_key.is_empty() {
+        // 未配置认证，直接放行
+        return Ok(next.run(req).await);
+    }
+
+    let auth_header = req.headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if auth_header == format!("Bearer {}", api_key) {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
 
 /// 创建路由器
 /// 把所有 URL 路径注册到对应的处理函数，返回给 main.rs 启动
@@ -152,7 +184,16 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/agent/execute_all", axum::routing::post(langgraph::agent_execute_all))
         // 并行执行所有任务
         
-        
+        .route("/api/agent/cancel", axum::routing::post(langgraph::agent_cancel))
+        .route("/api/agent/pending", axum::routing::post(langgraph::agent_pending))
+        .route("/api/agent/review", axum::routing::post(langgraph::agent_review))
+        // 人工审批
+
+        .route("/api/agent/progress/:session_id", axum::routing::get(langgraph::agent_progress))
+        .route("/api/agent/stats", axum::routing::get(langgraph::agent_token_stats))
+        .route("/api/agent/sessions/:id/logs", axum::routing::get(langgraph::agent_session_logs))
+        .route("/api/agent/sessions", axum::routing::get(langgraph::agent_list_sessions))
+        // 执行日志 + 历史
 
         // ────────────────────── 文档管理 ──────────────────────
         .route("/api/documents", axum::routing::get(document::list_documents))
@@ -199,6 +240,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/monitor/stats", axum::routing::get(stats::get_api_stats))
         // API 调用统计
 
+        // 应用认证中间件（只有配置了 api_key 才启用）
+        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         // 应用 CORS 中间件
         .layer(cors)
         // 注入全局状态，让所有处理函数都能访问

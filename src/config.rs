@@ -29,6 +29,9 @@ pub struct Config {
     pub qdrant: QdrantConfig,
     pub document: DocumentConfig,
     pub search: SearchConfig,
+    pub agent: AgentConfig,
+    pub auth: AuthConfig,
+    pub search_engine: SearchEngineConfig,
     pub logging: LoggingConfig,
     pub conversation: Option<ConversationConfig>,
 }
@@ -137,6 +140,57 @@ pub struct SearchConfig {
     pub test_sample_count: usize,
 }
 
+/// Agent 引擎配置
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentConfig {
+    /// 最大并行执行数（防 API 限流）
+    pub max_concurrency: usize,
+}
+
+/// 认证配置
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthConfig {
+    /// API Key（为空则不启用认证）
+    #[serde(default)]
+    pub api_key: String,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self { api_key: String::new() }
+    }
+}
+
+/// 搜索引擎配置
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchEngineConfig {
+    /// 搜索引擎提供方: "searxng" / "bing" / ""（空=降级LLM）
+    #[serde(default)]
+    pub provider: String,
+    /// 搜索引擎 API 地址（SearXNG: http://localhost:8888, Bing: https://api.bing.microsoft.com）
+    #[serde(default)]
+    pub base_url: String,
+    /// API Key（SearXNG 不需要, Bing 需要）
+    #[serde(default)]
+    pub api_key: String,
+}
+
+impl Default for SearchEngineConfig {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            base_url: String::new(),
+            api_key: String::new(),
+        }
+    }
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self { max_concurrency: 3 }
+    }
+}
+
 /// 日志配置
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoggingConfig {
@@ -241,6 +295,9 @@ impl Config {
                 min_score: 0.5,
                 test_sample_count: 10,
             },
+            agent: AgentConfig::default(),
+            auth: AuthConfig::default(),
+            search_engine: SearchEngineConfig::default(),
             logging: LoggingConfig {
                 level: "info".to_string(),
                 file_output: false,
@@ -287,7 +344,7 @@ impl Config {
             model: self.openai.chat_model.clone(),
             streaming: false,
             temperature: Some(0.7),
-            max_tokens: Some(500),
+            max_tokens: Some(2048),
             ..Default::default()
         }
     }
@@ -367,6 +424,9 @@ mod tests {
                 min_score: 0.5,
                 test_sample_count: 10,
             },
+            agent: AgentConfig::default(),
+            auth: AuthConfig::default(),
+            search_engine: SearchEngineConfig::default(),
             logging: LoggingConfig {
                 level: "info".to_string(),
                 file_output: false,

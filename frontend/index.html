@@ -6,7 +6,7 @@
 <meta http-equiv="Pragma" content="no-cache">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LangChainRust Demo - 向量搜索 + RAG 对话</title>
-    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/style.css?t=20260510v2">
 </head>
 <body>
     <button class="dark-mode-toggle" onclick="toggleDarkMode()">🌙 深色模式</button>
@@ -214,7 +214,13 @@
         </div>
         
         <div id="agent-tab" class="card hidden">
-            <h2>🤖 真实 Agent 执行引擎</h2>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;">
+                <h2 style="margin:0;">🤖 真实 Agent 执行引擎</h2>
+                <div style="display:flex;gap:6px;">
+                    <button class="btn" onclick="loadAgentHistory()" style="background:#6366f1;color:white;padding:6px 12px;font-size:13px;">📋 历史记录</button>
+                    <button class="btn" onclick="loadAgentStats()" style="background:#059669;color:white;padding:6px 12px;font-size:13px;">📊 Token 统计</button>
+                </div>
+            </div>
             <p style="color: #666; margin-bottom: 15px;">LLM 拆解任务 → 分配工具 → 按依赖执行 → 上下文传递 → 验证结果</p>
             <div style="margin-bottom:15px;">
                 <div style="display:flex;gap:10px;">
@@ -241,6 +247,9 @@
                 <button class="btn" onclick="runAgentExecute()" style="background:#8b5cf6;color:white;margin-bottom:15px;">▶ 执行所有任务</button>
             </div>
             <div id="agent-results"></div>
+            <div id="agent-history" style="display:none;margin-top:10px;"></div>
+            <div id="agent-stats" style="display:none;margin-top:10px;"></div>
+            <div id="agent-log-detail" style="display:none;margin-top:10px;"></div>
         </div>
         
         <div id="aggregate-tab" class="card hidden">
@@ -453,7 +462,7 @@
         </div>
     </div>
     
-    <script src="js/app.js?t=20260510"></script>
+    <script src="js/app.js?t=20260510v2"></script>
     <script src="js/aggregate.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </body>

@@ -15,8 +15,6 @@ use langchainrust_agent::{
 // Arc = 原子引用计数，让多个地方安全共享同一个数据
 use std::sync::Arc;
 
-// #[tokio::main] 把 main 函数变成异步入口
-// tokio 是 Rust 的异步运行时，类似 Python 的 asyncio
 #[tokio::main]
 async fn main() {
     // 初始化日志系统（之后用 tracing::info! 打印日志）
@@ -31,9 +29,24 @@ async fn main() {
     tracing::info!("Collection: {}", config.qdrant.collection_name);
     
     // 创建 API 服务：连接数据库 + 实例化各个模块
+    let api = ApiService::new(config.clone()).await
+        .expect("API 服务初始化失败");
+
+    // 恢复未完成的 Agent session
+    let pool = api.conversation_store.pool();
+    let recovered = langchainrust_agent::services::agent_executor::recover_sessions(&pool).await;
+    if !recovered.is_empty() {
+        tracing::info!("恢复 {} 个未完成的 Agent session", recovered.len());
+        for r in &recovered {
+            tracing::info!("  session={}, task={}, done={}",
+                r["session_id"].as_str().unwrap_or(""),
+                r["task"].as_str().unwrap_or(""),
+                r["completed_tasks"].as_i64().unwrap_or(0));
+        }
+    }
+
     // Arc::new 包装成线程安全共享引用
-    let api = Arc::new(ApiService::new(config.clone()).await
-        .expect("API 服务初始化失败"));
+    let api = Arc::new(api);
     
     // 全局状态 = API 服务 + 配置，传给所有路由处理函数
     let state = Arc::new(AppState {
@@ -55,6 +68,5 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     
     // 使用 Axum 框架启动 HTTP 服务器
-    // axum::serve 会把收到的每个 HTTP 请求交给 create_router 注册的路由处理
     axum::serve(listener, app).await.unwrap();
 }

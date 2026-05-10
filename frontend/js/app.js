@@ -1691,6 +1691,7 @@ async function agentStepExecute() {
     if (!_agentPlanData) { alert('请先规划'); return; }
     _agentSessionId = null;
     _agentAllResults = [];
+    disconnectAgentSSE();
     await agentFetchAndShow(true);
 }
 
@@ -1707,7 +1708,6 @@ async function agentNextBatch() {
 async function agentFetchAndShow(isFirst) {
     const resDiv = document.getElementById('agent-results');
     if (isFirst) {
-        // 保留上方规划表格，下方追加结果区域
         let execDiv = document.createElement('div');
         execDiv.id = 'agent-exec-area';
         execDiv.innerHTML = '<div style="text-align:center;padding:30px;color:#8b5cf6;">⏳ 执行中...</div>';
@@ -1724,7 +1724,10 @@ async function agentFetchAndShow(isFirst) {
         const data = await res.json();
         if (!res.ok) { throw new Error(data.error || '失败'); }
 
-        if (isFirst) _agentSessionId = data.session_id;
+        if (isFirst) {
+            _agentSessionId = data.session_id;
+            connectAgentSSE(data.session_id);
+        }
         (data.results || []).forEach(r => _agentAllResults.push(r));
 
         const annotations = {};
@@ -1741,13 +1744,51 @@ async function agentFetchAndShow(isFirst) {
         });
         html += '</tbody></table>';
 
-        // 替换或追加到已有结果
-        if (isFirst) {
+        // 检查是否有待审核任务
+        let hasPendingReview = false;
+        if (_agentSessionId) {
+            try {
+                const pendingRes = await fetch('/api/agent/pending', {
+                    method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({session_id: _agentSessionId})
+                });
+                if (pendingRes.ok) {
+                    const pendingData = await pendingRes.json();
+                    const pendingList = pendingData.pending || [];
+                    if (pendingList.length > 0) {
+                        hasPendingReview = true;
+                        // 显示待审核任务区域
+                        html += '<div id="review-area" style="border:2px solid #f59e0b;border-radius:8px;padding:15px;margin-top:10px;background:#fffbeb;">';
+                        html += '<h4 style="margin:0 0 10px 0;color:#d97706;">⏳ 待人工审核</h4>';
+                        pendingList.forEach(t => {
+                            html += '<div style="border:1px solid #fde68a;border-radius:6px;padding:12px;margin-bottom:10px;background:white;">';
+                            html += '<div style="font-weight:bold;color:#92400e;margin-bottom:5px;">' + escapeHtml(t.name) + '</div>';
+                            html += '<div style="font-size:13px;color:#78350f;margin-bottom:10px;">' + escapeHtml(t.description) + '</div>';
+                            html += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">';
+                            html += '<textarea id="review-feedback-' + escapeHtml(t.name) + '" placeholder="审批意见（可选）" style="flex:1;min-width:150px;padding:6px;border:1px solid #d1d5db;border-radius:4px;font-size:12px;" rows="1"></textarea>';
+                            html += '<button class="btn" onclick="submitReview(\'' + escapeHtml(t.name) + '\',true)" style="background:#10b981;color:white;padding:8px 16px;">✅ 通过</button>';
+                            html += '<button class="btn" onclick="submitReview(\'' + escapeHtml(t.name) + '\',false)" style="background:#ef4444;color:white;padding:8px 16px;">❌ 拒绝</button>';
+                            html += '</div></div>';
+                        });
+                        html += '<div style="text-align:center;margin-top:5px;">';
+                        html += '<button class="btn" onclick="agentNextBatch()" style="background:#8b5cf6;color:white;padding:10px 24px;">▶ 审批后继续执行</button>';
+                        html += '</div></div>';
+                    }
+                }
+            } catch (e) { /* ignore pending check errors */ }
+        }
+
+        if (!hasPendingReview) {
             html += '<div style="padding:10px;text-align:center;">'
                 + (data.has_next
-                    ? '<button class="btn" onclick="agentNextBatch()" style="background:#8b5cf6;color:white;width:100%;padding:12px;">▶ 下一步 (' + _agentAllResults.length + '/' + _agentPlanData.tasks.length + ')</button>'
+                    ? '<div style="display:flex;gap:8px;"><button class="btn" onclick="agentNextBatch()" style="background:#8b5cf6;color:white;flex:1;padding:12px;">▶ 下一步 (' + _agentAllResults.length + '/' + _agentPlanData.tasks.length + ')</button>'
+                    + '<button class="btn" onclick="cancelAgentExecution()" style="background:#ef4444;color:white;padding:12px;">✕ 取消</button></div>'
                     : '<span style="color:#10b981;font-weight:bold;">✅ 全部完成</span>')
-                + '</div></div>';
+                + '</div>';
+        }
+        html += '</div>';
+
+        if (isFirst) {
             let existArea = document.getElementById('agent-exec-area');
             if (existArea) {
                 existArea.innerHTML = html;
@@ -1769,19 +1810,225 @@ async function agentFetchAndShow(isFirst) {
                     tbody.appendChild(row);
                 });
             }
-            let footer = document.createElement('div');
-            footer.style.cssText = 'padding:10px;text-align:center;';
-            if (data.has_next) {
-                footer.innerHTML = '<button class="btn" onclick="agentNextBatch()" style="background:#8b5cf6;color:white;width:100%;padding:12px;">▶ 下一步 (' + _agentAllResults.length + '/' + _agentPlanData.tasks.length + ')</button>';
-            } else {
-                footer.innerHTML = '<span style="color:#10b981;font-weight:bold;">✅ 全部完成</span>';
+            if (!hasPendingReview) {
+                let footer = document.createElement('div');
+                footer.style.cssText = 'padding:10px;text-align:center;';
+                if (data.has_next) {
+                    footer.innerHTML = '<div style="display:flex;gap:8px;"><button class="btn" onclick="agentNextBatch()" style="background:#8b5cf6;color:white;flex:1;padding:12px;">▶ 下一步 (' + _agentAllResults.length + '/' + _agentPlanData.tasks.length + ')</button>'
+                        + '<button class="btn" onclick="cancelAgentExecution()" style="background:#ef4444;color:white;padding:12px;">✕ 取消</button></div>';
+                } else {
+                    footer.innerHTML = '<span style="color:#10b981;font-weight:bold;">✅ 全部完成</span>';
+                }
+                document.querySelector('#agent-results-table').appendChild(footer);
             }
-            document.querySelector('#agent-results-table').appendChild(footer);
         }
     } catch (e) {
         resDiv.innerHTML = '<div style="color:#e94560;padding:20px;">❌ ' + escapeHtml(e.message) + '</div>';
     }
 }
+
+// 取消 Agent 执行
+async function cancelAgentExecution() {
+    if (!_agentSessionId) { showToast('没有正在执行的任务'); return; }
+    try {
+        const res = await fetch('/api/agent/cancel', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({session_id: _agentSessionId})
+        });
+        if (!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.error||'取消失败'); }
+        showToast('✕ 已取消执行');
+        disconnectAgentSSE();
+        document.querySelectorAll('#agent-results-table .btn').forEach(b => b.disabled = true);
+    } catch (e) {
+        showToast('❌ ' + e.message);
+    }
+}
+
+// 提交人工审批
+async function submitReview(taskName, approved) {
+    const feedbackEl = document.getElementById('review-feedback-' + taskName.replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_'));
+    const feedback = feedbackEl ? feedbackEl.value : '';
+    try {
+        const res = await fetch('/api/agent/review', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({
+                session_id: _agentSessionId,
+                task_name: taskName,
+                approved: approved,
+                feedback: feedback
+            })
+        });
+        if (!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.error||'审批失败'); }
+        showToast(approved ? '✅ 已批准' : '❌ 已拒绝');
+        // 移除已审批的任务卡片
+        const reviewArea = document.getElementById('review-area');
+        if (reviewArea) {
+            // 刷新 pending 列表
+            const pendingRes = await fetch('/api/agent/pending', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({session_id: _agentSessionId})
+            });
+            if (pendingRes.ok) {
+                const pendingData = await pendingRes.json();
+                const pendingList = pendingData.pending || [];
+                if (pendingList.length === 0) {
+                    // 全部审批完成，可以继续
+                    reviewArea.innerHTML = '<div style="text-align:center;padding:10px;color:#10b981;">✅ 全部审批完成，点击继续执行</div>';
+                    reviewArea.innerHTML += '<div style="text-align:center;margin-top:5px;"><button class="btn" onclick="agentNextBatch()" style="background:#8b5cf6;color:white;padding:10px 24px;">▶ 继续执行</button></div>';
+                }
+            }
+        }
+    } catch (e) {
+        showToast('❌ ' + e.message);
+    }
+}
+
+// ──── Agent SSE 连接 ────
+let _agentEventSource = null;
+
+function connectAgentSSE(sessionId) {
+    disconnectAgentSSE();
+    if (!sessionId) return;
+    const url = `${API_BASE}/agent/progress/${encodeURIComponent(sessionId)}`;
+    _agentEventSource = new EventSource(url);
+    _agentEventSource.addEventListener('progress', (e) => {
+        try {
+            const data = JSON.parse(e.data);
+            if (data.type === 'task_complete') {
+                showToast(`✅ ${data.task} 完成 (${data.duration_ms}ms)`);
+            } else if (data.type === 'task_error') {
+                showToast(`❌ ${data.task} 失败`);
+            }
+        } catch (err) { /* ignore parse errors */ }
+    });
+    _agentEventSource.addEventListener('error', () => {
+        // SSE 断开是正常的（任务结束），自动清理
+        disconnectAgentSSE();
+    });
+}
+
+function disconnectAgentSSE() {
+    if (_agentEventSource) {
+        _agentEventSource.close();
+        _agentEventSource = null;
+    }
+}
+
+// ──── Agent 历史记录 ────
+async function loadAgentHistory() {
+    const div = document.getElementById('agent-history');
+    const statsDiv = document.getElementById('agent-stats');
+    statsDiv.style.display = 'none';
+    if (div.style.display === 'block') { div.style.display = 'none'; return; }
+    div.style.display = 'block';
+    div.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8;">⏳ 加载中...</div>';
+
+    try {
+        const res = await fetch(`${API_BASE}/agent/sessions`);
+        if (!res.ok) throw new Error('加载失败');
+        const sessions = await res.json();
+        if (sessions.length === 0) {
+            div.innerHTML = '<div style="text-align:center;padding:30px;color:#94a3b8;">暂无执行记录</div>';
+            return;
+        }
+        let html = '<div style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;">';
+        html += '<h4 style="margin:0 0 10px 0;color:#4f46e5;">📋 历史执行记录</h4>';
+        html += '<table style="width:100%"><thead><tr style="background:#eef2ff;"><th>任务</th><th>时间</th><th>状态</th><th></th></tr></thead><tbody>';
+        sessions.forEach(s => {
+            const statusColor = s.status === 'completed' ? '#10b981' : s.status === 'interrupted' ? '#f59e0b' : '#8b5cf6';
+            html += `<tr><td style="padding:8px;">${escapeHtml(s.task)}</td>
+                <td style="padding:8px;font-size:12px;color:#64748b;">${s.created_at || ''}</td>
+                <td style="padding:8px;"><span style="background:${statusColor}20;color:${statusColor};padding:2px 8px;border-radius:4px;font-size:12px;">${s.status}</span></td>
+                <td style="padding:8px;"><button class="btn btn-small" onclick="loadAgentSessionLogs('${s.session_id}')" style="background:#6366f1;color:white;">查看</button></td></tr>`;
+        });
+        html += '</tbody></table></div>';
+        div.innerHTML = html;
+    } catch (e) {
+        div.innerHTML = `<div style="color:#e94560;padding:20px;">❌ ${e.message}</div>`;
+    }
+}
+
+// ──── Agent 日志详情 ────
+async function loadAgentSessionLogs(sessionId) {
+    const div = document.getElementById('agent-log-detail');
+    div.style.display = 'block';
+    div.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8;">⏳ 加载中...</div>';
+
+    try {
+        const res = await fetch(`${API_BASE}/agent/sessions/${encodeURIComponent(sessionId)}/logs`);
+        if (!res.ok) throw new Error('加载失败');
+        const data = await res.json();
+
+        let html = '<div style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;">';
+        html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">';
+        html += `<h4 style="margin:0;color:#4f46e5;">📄 ${escapeHtml(data.task)}</h4>`;
+        html += `<button class="btn btn-small" onclick="document.getElementById('agent-log-detail').style.display='none'" style="background:#94a3b8;color:white;">✕ 关闭</button></div>`;
+        html += `<div style="font-size:12px;color:#64748b;margin-bottom:10px;">Session: ${data.session_id} | 创建: ${data.created_at} | 状态: ${data.status} | 共 ${data.total} 个任务</div>`;
+        html += '<table style="width:100%"><thead><tr style="background:#eef2ff;"><th>任务</th><th>工具</th><th>耗时</th><th>Token</th><th>输出</th></tr></thead><tbody>';
+
+        (data.results || []).forEach(r => {
+            html += `<tr><td style="padding:6px;font-weight:bold;">${escapeHtml(r.task_name)}</td>
+                <td style="padding:6px;"><span style="background:#ede9fe;padding:2px 6px;border-radius:4px;font-size:11px;">${escapeHtml(r.tool)}</span></td>
+                <td style="padding:6px;font-size:12px;color:#64748b;">${r.duration_ms}ms</td>
+                <td style="padding:6px;font-size:12px;color:#64748b;">${r.tokens}</td>
+                <td style="padding:6px;font-size:12px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(r.output_preview || r.output)}">${escapeHtml((r.output_preview || r.output).substring(0,80))}</td></tr>`;
+        });
+        html += '</tbody></table></div>';
+        // 如果还有 final_answer
+        if (data.final_answer) {
+            html += '<div style="border:1px solid #d1fae5;background:#ecfdf5;border-radius:8px;padding:15px;margin-top:10px;"><strong style="color:#059669;">最终答案：</strong><br>' + escapeHtml(data.final_answer) + '</div>';
+        }
+        div.innerHTML = html;
+    } catch (e) {
+        div.innerHTML = `<div style="color:#e94560;padding:20px;">❌ ${e.message}</div>`;
+    }
+}
+
+// ──── Agent Token 统计 ────
+// 统计所有 Agent 执行记录的汇总数据：
+// - 总共执行了多少次任务
+// - 所有任务加在一起花了多少 Token（调用 LLM 的总 token 数）
+// - 所有任务花了多少时间
+// - 平均每次任务花多少 Token
+async function loadAgentStats() {
+    const div = document.getElementById('agent-stats');
+    const historyDiv = document.getElementById('agent-history');
+    historyDiv.style.display = 'none';
+    if (div.style.display === 'block') { div.style.display = 'none'; return; }
+    div.style.display = 'block';
+    div.innerHTML = '<div style="text-align:center;padding:20px;color:#94a3b8;">⏳ 加载中...</div>';
+
+    try {
+        const res = await fetch(`${API_BASE}/agent/stats`);
+        if (!res.ok) throw new Error('加载失败');
+        const stats = await res.json();
+
+        let html = '<div style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;">';
+        html += '<h4 style="margin:0 0 10px 0;color:#059669;">📊 Agent 执行统计</h4>';
+        html += '<div style="font-size:13px;color:#64748b;margin-bottom:12px;">从 Agent 引擎启用至今，所有执行任务的汇总数据</div>';
+        html += '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;">';
+        html += `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:15px;">
+            <div style="font-size:28px;font-weight:bold;color:#16a34a;">${stats.total_sessions}</div>
+            <div style="font-size:13px;color:#166534;">总共执行次数<br><span style="font-size:11px;color:#64748b;">调用了这么多次 Agent 执行</span></div></div>`;
+        html += `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:15px;">
+            <div style="font-size:28px;font-weight:bold;color:#dc2626;">${(stats.total_tokens || 0).toLocaleString()}</div>
+            <div style="font-size:13px;color:#991b1b;">总 Token 消耗<br><span style="font-size:11px;color:#64748b;">调用 LLM 一共花了这么多 Token（含输入+输出）</span></div></div>`;
+        html += `<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:15px;">
+            <div style="font-size:28px;font-weight:bold;color:#2563eb;">${(stats.total_duration_ms/1000).toFixed(1)}s</div>
+            <div style="font-size:13px;color:#1e40af;">总执行耗时<br><span style="font-size:11px;color:#64748b;">所有任务加在一起花了这么长时间</span></div></div>`;
+        html += `<div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:15px;">
+            <div style="font-size:28px;font-weight:bold;color:#7c3aed;">${stats.avg_tokens_per_session || 0}</div>
+            <div style="font-size:13px;color:#5b21b6;">平均 Token/次<br><span style="font-size:11px;color:#64748b;">每次执行平均消耗这么多 Token</span></div></div>`;
+        html += '</div></div>';
+        div.innerHTML = html;
+    } catch (e) {
+        div.innerHTML = `<div style="color:#e94560;padding:20px;">❌ ${e.message}</div>`;
+    }
+}
+
+// ──── 修改 agentFetchAndShow 加入 SSE 连接 ────
+// 在原函数末尾加上 SSE 连接
+// （注：SSE 连接在 agentStepExecute 的第一次调用时建立）
 
 document.addEventListener('DOMContentLoaded', function() {
     const uploadArea = document.getElementById('upload-area');

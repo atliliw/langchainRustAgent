@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::errors::GraphDemoError;
 use crate::models::*;
+use crate::services::tools::{ToolRegistry, ToolContext};
 use crate::stores::QdrantStore;
 use langchainrust::langgraph::{
     AgentState, CompiledGraph, MessageEntry, ParallelInvocation,
@@ -9,30 +10,11 @@ use langchainrust::langgraph::{
 use langchainrust::{language_models::OpenAIChat, schema::Message, core::runnables::Runnable};
 use sqlx::SqlitePool;
 use std::collections::{HashSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::time::Duration;
+use tokio::sync::{broadcast, Semaphore};
 use uuid::Uuid;
-
-pub const AVAILABLE_TOOLS: &[(&str, &str)] = &[
-    ("llm_query","直接用 LLM 回答"),("web_search","搜索网络获取信息"),("weather","查询天气"),
-    ("code_execute","执行代码"),("read_file","读取文件"),("summarize","总结"),
-    ("rag_search","检索知识库（RAG）获取与任务相关的文档内容"),
-];
-
-// ── 天气查询（提取为自由函数，run_batch 和框架版本共用） ──
-async fn query_weather(city: &str) -> Result<String, String> {
-    let e: String = city.chars().map(|c| match c { 'A'..='Z'|'a'..='z'|'0'..='9'|'-'|'_'|'.'|'~' => c.to_string(), _ => format!("%{:02X}",c as u8) }).collect();
-    reqwest::get(&format!("https://wttr.in/{}?format=%C+|+%t+|+%h+|+%w&lang=zh", e)).await
-        .map_err(|e| e.to_string())?.text().await.map_err(|e| e.to_string())
-}
-
-/// 当 API 不返回 token_usage 时，用文本长度估算 token 数
-fn estimate_token_usage(prompt: &str, response: &str) -> usize {
-    let input_tokens = prompt.chars().count() / 2 + 1;
-    let output_tokens = response.chars().count() / 2 + 1;
-    input_tokens + output_tokens
-}
 
 // ── SQLite 持久化辅助 ──
 async fn ensure_agent_tables(pool: &SqlitePool) -> Result<(), sqlx::Error> {
@@ -40,6 +22,7 @@ async fn ensure_agent_tables(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "CREATE TABLE IF NOT EXISTS agent_sessions (
             session_id TEXT PRIMARY KEY,
             task TEXT NOT NULL,
+            plan_json TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             status TEXT NOT NULL DEFAULT 'running'
         )"
@@ -61,14 +44,92 @@ async fn ensure_agent_tables(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-async fn save_agent_session(pool: &SqlitePool, session_id: &str, task: &str) {
+async fn save_agent_session(pool: &SqlitePool, session_id: &str, task: &str, plan_json: &str) {
     let _ = sqlx::query(
-        "INSERT OR IGNORE INTO agent_sessions (session_id, task, status) VALUES (?, ?, 'running')"
+        "INSERT OR IGNORE INTO agent_sessions (session_id, task, plan_json, status) VALUES (?, ?, ?, 'running')"
     )
     .bind(session_id)
     .bind(task)
+    .bind(plan_json)
     .execute(pool)
     .await;
+}
+
+/// 服务启动时恢复未完成的 session
+pub async fn recover_sessions(pool: &SqlitePool) -> Vec<serde_json::Value> {
+    let _ = ensure_agent_tables(pool).await;
+    let mut recovered = Vec::new();
+
+    // 查出所有 running 状态的 session
+    let rows = match sqlx::query_as::<_, (String, String, String, String)>(
+        "SELECT session_id, task, plan_json, created_at FROM agent_sessions WHERE status = 'running'"
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => return recovered,
+    };
+
+    for (sid, task, plan_json, created_at) in rows {
+        // 反序列化 plan，重建 BatchState
+        let tasks: Vec<AgentTask> = serde_json::from_str(&plan_json).unwrap_or_default();
+
+        // 读取已完成的 results
+        let results = match sqlx::query_as::<_, (String, String, String, i64, i64)>(
+            "SELECT task_name, tool, output, duration_ms, tokens FROM agent_results WHERE session_id = ? ORDER BY id ASC"
+        )
+        .bind(&sid)
+        .fetch_all(pool)
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let done: Vec<AgentExecResult> = results.into_iter().map(|(name, tool, output, dur, tok)| {
+            AgentExecResult {
+                task_name: name,
+                tool,
+                output,
+                duration_ms: dur as u64,
+                tokens: tok as usize,
+                input_summary: String::new(),
+            }
+        }).collect();
+
+        let completed_names: HashSet<String> = done.iter().map(|r| r.task_name.clone()).collect();
+        let cancel_flag = get_cancel_flag(&sid);
+
+        let state = BatchState {
+            task: task.clone(),
+            all: tasks,
+            done: done.clone(),
+            completed_names,
+            start: Instant::now(),
+            rag_context: String::new(),
+            review_pending: Vec::new(),
+            cancel: cancel_flag,
+            progress_tx: None,
+        };
+
+        // 标记已取消（不自动恢复执行，避免意外）
+        let _ = sqlx::query("UPDATE agent_sessions SET status = 'interrupted' WHERE session_id = ?")
+            .bind(&sid)
+            .execute(pool)
+            .await;
+
+        store().lock().unwrap().get_or_insert_with(HashMap::new).insert(sid.clone(), state);
+        recovered.push(serde_json::json!({
+            "session_id": sid,
+            "task": task,
+            "created_at": created_at,
+            "completed_tasks": done.len(),
+            "status": "interrupted",
+        }));
+    }
+
+    recovered
 }
 
 async fn save_agent_result(pool: &SqlitePool, session_id: &str, r: &AgentExecResult) {
@@ -93,6 +154,38 @@ async fn update_agent_session_status(pool: &SqlitePool, session_id: &str, status
         .await;
 }
 
+// ── 取消信号存储 ──
+static CANCELLATION: Mutex<Option<HashMap<String, Arc<AtomicBool>>>> = Mutex::new(None);
+fn cancel_store() -> &'static Mutex<Option<HashMap<String, Arc<AtomicBool>>>> { &CANCELLATION }
+
+fn set_cancelled(sid: &str) {
+    if let Ok(mut g) = cancel_store().lock() {
+        if let Some(ref mut m) = *g {
+            if let Some(flag) = m.get(sid) {
+                flag.store(true, Ordering::Relaxed);
+                tracing::info!(session_id = %sid, "Agent 任务已标记取消");
+            }
+        }
+    }
+}
+
+fn get_cancel_flag(sid: &str) -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    if let Ok(mut g) = cancel_store().lock() {
+        let m = g.get_or_insert_with(HashMap::new);
+        m.entry(sid.to_string()).or_insert_with(|| flag.clone());
+    }
+    flag
+}
+
+fn remove_cancel_flag(sid: &str) {
+    if let Ok(mut g) = cancel_store().lock() {
+        if let Some(ref mut m) = *g {
+            m.remove(sid);
+        }
+    }
+}
+
 // ── 状态存储（保留 session 管理） ──
 struct BatchState {
     task: String,
@@ -102,6 +195,9 @@ struct BatchState {
     start: Instant,
     rag_context: String,
     review_pending: Vec<AgentTask>,
+    #[allow(dead_code)]
+    cancel: Arc<AtomicBool>,
+    progress_tx: Option<broadcast::Sender<String>>,
 }
 static STORE: Mutex<Option<HashMap<String, BatchState>>> = Mutex::new(None);
 fn store() -> &'static Mutex<Option<HashMap<String, BatchState>>> { &STORE }
@@ -191,7 +287,10 @@ impl AgentEngine {
     /// ── 规划 ──
     pub async fn plan(config: &Config, task: String, rag_context: String, use_rag: bool, use_routing: bool) -> Result<AgentPlan, GraphDemoError> {
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
-        let tj = AVAILABLE_TOOLS.iter().map(|(n,d)| format!("{{\"name\":\"{}\",\"description\":\"{}\"}}",n,d)).collect::<Vec<_>>().join(",");
+        let registry = ToolRegistry::default_registry();
+        let tj = registry.list_descriptions().iter()
+            .map(|(n,d)| format!("{{\"name\":\"{}\",\"description\":\"{}\"}}", n, d))
+            .collect::<Vec<_>>().join(",");
 
         let routing_section = if use_routing {
             "注意：如果任务需要根据中间结果决定下一步，必须创建 type=decision 的决策节点。\n\
@@ -217,26 +316,32 @@ impl AgentEngine {
                 format!("\n\n知识库检索到以下相关信息：\n{}", rag_context)
             };
             format!(
-                "第一个子任务必须是「知识库检索」，使用 rag_search 工具。后续子任务基于知识库检索的结果执行。{rag}\n\
+                "第一个子任务必须是「知识库检索」，使用 rag_search 工具。后续子任务基于知识库检索的结果执行。{}\n\
                  将任务拆解为2-5个子任务并分配工具。\n\
-                 {routing}\
-                 要求：对比类任务必须将A和B拆成独立的搜索任务（depends_on为空），最终汇总任务depends_on所有搜索任务。\n\
-                 可用工具：[{tools}]\n\
+                 {}\
+                 要求：\n\
+                 1. 把大任务拆成小步骤，每个子任务职责单一\n\
+                 2. 可以用 depends_on 表示任务之间的依赖关系\n\
+                 3. depends_on 为空的子任务可以并行执行\n\
+                 可用工具：[{}]\n\
                  返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"task_type\": \"normal\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
-                 任务：{task}\n\
+                 任务：{}\n\
                  只返回JSON。",
-                rag = rag_context_block, routing = routing_section, tools = tj, task = task
+                rag_context_block, routing_section, tj, task
             )
         } else {
             format!(
                 "将任务拆解为2-5个子任务并分配工具。\n\
-                 {routing}\
-                 要求：对比类任务必须将A和B拆成独立的搜索任务（depends_on为空），最终汇总任务depends_on所有搜索任务。\n\
-                 可用工具：[{tools}]\n\
+                 {}\
+                 要求：\n\
+                 1. 把大任务拆成小步骤，每个子任务职责单一\n\
+                 2. 可以用 depends_on 表示任务之间的依赖关系\n\
+                 3. depends_on 为空的子任务可以并行执行\n\
+                 可用工具：[{}]\n\
                  返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"task_type\": \"normal\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
-                 任务：{task}\n\
+                 任务：{}\n\
                  只返回JSON。",
-                routing = routing_section, tools = tj, task = task
+                routing_section, tj, task
             )
         };
         let r = llm.invoke(vec![Message::human(&p)], None).await.map_err(|e| GraphDemoError::ExecutionError(e.to_string()))?;
@@ -321,8 +426,13 @@ impl AgentEngine {
         ctx: String,
         rag: String,
         vector_store: Option<Arc<QdrantStore>>,
+        max_concurrency: usize,
+        cancel: Option<Arc<AtomicBool>>,
+        progress_tx: Option<broadcast::Sender<String>>,
     ) -> Result<CompiledGraph<AgentState>, GraphDemoError> {
         let mut graph = StateGraph::<AgentState>::new();
+        let semaphore = Arc::new(Semaphore::new(max_concurrency));
+        let cancel = cancel.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
 
         // 空节点，作为 FanOut 的入口
         graph.add_node_fn("__dispatch__", |state| {
@@ -337,7 +447,10 @@ impl AgentEngine {
             let ctx = ctx.clone();
             let rag = rag.clone();
             let vector_store = vector_store.clone();
+            let sem = semaphore.clone();
 
+            let cancel = cancel.clone();
+            let progress_tx = progress_tx.clone();
             graph.add_async_node(at.name.clone(), move |state: &AgentState| {
                 let at = at.clone();
                 let config = config.clone();
@@ -346,8 +459,31 @@ impl AgentEngine {
                 let rag = rag.clone();
                 let state = state.clone();
                 let vector_store = vector_store.clone();
+                let sem = sem.clone();
+                let cancel = cancel.clone();
+                let progress_tx = progress_tx.clone();
 
                 async move {
+                    // 检查是否已取消
+                    if cancel.load(Ordering::Relaxed) {
+                        tracing::info!(task_name = %at.name, "任务已取消，跳过执行");
+                        return Ok(StateUpdate::full(state));
+                    }
+
+                    // 获取并发许可
+                    let _permit = match sem.acquire().await {
+                        Ok(p) => p,
+                        Err(_) => {
+                            tracing::warn!(task_name = %at.name, "并发许可获取失败");
+                            return Ok(StateUpdate::full(state));
+                        }
+                    };
+
+                    // 再次检查取消（等待许可期间可能被取消）
+                    if cancel.load(Ordering::Relaxed) {
+                        tracing::info!(task_name = %at.name, "任务在等待许可时被取消");
+                        return Ok(StateUpdate::full(state));
+                    }
                     let task_name = at.name.clone();
                     let tool_name = at.tool.clone();
                     let input_template = at.input_template.clone();
@@ -355,17 +491,18 @@ impl AgentEngine {
 
                     let task_start = Instant::now();
 
-                    let handle = tokio::spawn(async move {
-                        let llm = OpenAIChat::new(
-                            config.to_langchain_openai_config().with_max_tokens(2048)
-                        );
+                    let registry = Arc::new(ToolRegistry::default_registry());
+                    let spawn_progress_tx = progress_tx.clone();
 
+                    let handle = tokio::spawn(async move {
                         let (output, tokens) = match at.task_type.as_str() {
                             "human_review" => {
                                 (format!("⏸️ 待人工审批：{}", at.description), 0)
                             }
-                            // 决策节点：调 LLM 判断，不执行具体任务
                             "decision" => {
+                                let decision_llm = OpenAIChat::new(
+                                    config.to_langchain_openai_config().with_max_tokens(1024)
+                                );
                                 let ctx_str = if ctx.is_empty() { "无前置结果".to_string() } else {
                                     format!("前置完成的任务结果：\n{}", ctx)
                                 };
@@ -374,211 +511,50 @@ impl AgentEngine {
                                     "基于以下信息做出判断，只返回决策结果（{}），不要多余内容。\n\n{}\n\n当前决策：{}",
                                     route_options.join(" 或 "), ctx_str, at.description
                                 );
-                                match llm.invoke(vec![Message::human(&p)], None).await {
+                                match decision_llm.invoke(vec![Message::human(&p)], None).await {
                                     Ok(r) => {
                                         let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
                                         (r.content.clone(), t)
                                     }
-                                    Err(e) => ("判断失败".to_string(), 0),
-                                }
-                            }
-                            _ => match at.tool.as_str() {
-                            "llm_query" | "" => {
-                                let p = if ctx.is_empty() {
-                                    format!("任务：{}\n当前子任务：{}\n\n请执行当前子任务并输出结果。{}",
-                                        task, at.description, rag)
-                                } else {
-                                    format!("任务：{}\n当前子任务：{}\n\n前置完成的任务结果：\n{}\n\n请基于前置结果执行当前子任务并输出。{}",
-                                        task, at.description, ctx, rag)
-                                };
-                                let mut last_error = String::new();
-                                let mut result = None;
-                                for attempt in 1..=3 {
-                                    match tokio::time::timeout(Duration::from_secs(120),
-                                        llm.invoke(vec![Message::human(&p)], None)
-                                    ).await {
-                                        Ok(Ok(r)) => {
-                                            let t = r.token_usage.as_ref()
-                                                .map(|u| u.total_tokens)
-                                                .unwrap_or_else(|| estimate_token_usage(&p, &r.content));
-                                            result = Some((r.content.clone(), t));
-                                            break;
-                                        }
-                                        Ok(Err(e)) => {
-                                            last_error = e.to_string();
-                                            tracing::warn!("llm_query attempt {}/3 failed: {}", attempt, last_error);
-                                            if attempt < 3 {
-                                                tokio::time::sleep(std::time::Duration::from_secs([1, 3, 5][attempt - 1])).await;
-                                            }
-                                        }
-                                        Err(_) => {
-                                            last_error = "timeout".to_string();
-                                            tracing::warn!("llm_query attempt {}/3 timeout", attempt);
-                                            if attempt < 3 {
-                                                tokio::time::sleep(std::time::Duration::from_secs([1, 3, 5][attempt - 1])).await;
-                                            }
-                                        }
-                                    }
-                                }
-                                match result {
-                                    Some(r) => r,
-                                    None => (format!("执行失败(重试3次后): {}", last_error), 0),
-                                }
-                            }
-                            "web_search" => {
-                                let p = format!("任务：{}\n当前子任务：{}\n\n请基于你的知识回答。{}",
-                                    task, at.description, rag);
-                                let mut last_error = String::new();
-                                let mut result = None;
-                                for attempt in 1..=3 {
-                                    match tokio::time::timeout(Duration::from_secs(60),
-                                        llm.invoke(vec![Message::human(&p)], None)
-                                    ).await {
-                                        Ok(Ok(r)) => {
-                                            let t = r.token_usage.as_ref()
-                                                .map(|u| u.total_tokens)
-                                                .unwrap_or_else(|| estimate_token_usage(&p, &r.content));
-                                            result = Some((r.content.clone(), t));
-                                            break;
-                                        }
-                                        Ok(Err(e)) => {
-                                            last_error = e.to_string();
-                                            tracing::warn!("web_search attempt {}/3 failed: {}", attempt, last_error);
-                                            if attempt < 3 {
-                                                tokio::time::sleep(std::time::Duration::from_secs([1, 3, 5][attempt - 1])).await;
-                                            }
-                                        }
-                                        Err(_) => {
-                                            last_error = "timeout".to_string();
-                                            tracing::warn!("web_search attempt {}/3 timeout", attempt);
-                                            if attempt < 3 {
-                                                tokio::time::sleep(std::time::Duration::from_secs([1, 3, 5][attempt - 1])).await;
-                                            }
-                                        }
-                                    }
-                                }
-                                match result {
-                                    Some(r) => r,
-                                    None => (format!("执行失败(重试3次后): {}", last_error), 0),
-                                }
-                            }
-                            "weather" => {
-                                let city_prompt = format!("任务：{}\n当前子任务：{}\n\n请输出要查询天气的城市名，不要多余内容。",
-                                    task, at.description);
-                                let mut last_error = String::new();
-                                let mut city_result = None;
-                                for attempt in 1..=2 {
-                                    match tokio::time::timeout(Duration::from_secs(15),
-                                        llm.invoke(vec![Message::human(&city_prompt)], None)
-                                    ).await {
-                                        Ok(Ok(r)) => {
-                                            city_result = Some(r.content.trim().to_string());
-                                            break;
-                                        }
-                                        Ok(Err(e)) => {
-                                            last_error = e.to_string();
-                                            tracing::warn!("weather city extraction attempt {}/2 failed: {}", attempt, last_error);
-                                            if attempt < 2 {
-                                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                                            }
-                                        }
-                                        Err(_) => {
-                                            last_error = "timeout".to_string();
-                                            tracing::warn!("weather city extraction attempt {}/2 timeout", attempt);
-                                            if attempt < 2 {
-                                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                                            }
-                                        }
-                                    }
-                                }
-                                let city = match city_result {
-                                    Some(c) => c,
-                                    None => at.description.clone(),
-                                };
-                                match query_weather(&city).await {
-                                    Ok(r) => (format!("{}的天气：{}", city, r), 0),
-                                    Err(e) => (format!("天气查询失败: {}", e), 0),
-                                }
-                            }
-                            "rag_search" => {
-                                // 用任务名独立搜索向量库
-                                let query = if at.input_template.is_empty() {
-                                    at.name.clone()
-                                } else {
-                                    at.input_template.clone()
-                                };
-                                match &vector_store {
-                                    Some(store) => {
-                                        match tokio::time::timeout(Duration::from_secs(30), store.search_rag(&query, 3)).await {
-                                            Ok(Ok(results)) => {
-                                                let filtered: Vec<_> = results.iter()
-                                                    .filter(|r| r.score >= 0.3)
-                                                    .collect();
-                                                if filtered.is_empty() {
-                                                    (format!("知识库中未找到相关文档（搜索词：{}）", query), 0)
-                                                } else {
-                                                    let content: Vec<String> = filtered.iter().map(|r| {
-                                                        format!("[相关性 {:.1}%]\n{}", r.score * 100.0, r.document.content)
-                                                    }).collect();
-                                                    let embed_tokens = query.chars().count().max(1);
-                                                    (format!("知识库检索到以下相关信息（搜索词：{}，Embedding 消耗 ~{} tokens）：\n\n{}",
-                                                        query, embed_tokens, content.join("\n\n---\n\n")), embed_tokens)
-                                                }
-                                            }
-                                            Ok(Err(_)) => (format!("知识库搜索失败（搜索词：{}）", query), 0),
-                                            Err(_) => (format!("知识库搜索超时（搜索词：{}）", query), 0),
-                                        }
-                                    }
-                                    None => {
-                                        // 没有向量库时回退到共享的 rag 参数
-                                        if rag.is_empty() {
-                                            ("知识库中未找到相关文档".to_string(), 0)
-                                        } else {
-                                            (format!("知识库检索到以下相关信息：\n\n{}", rag), 0)
-                                        }
-                                    }
+                                    Err(_e) => ("判断失败".to_string(), 0),
                                 }
                             }
                             _ => {
-                                let p = format!("任务：{}\n子任务：{}\n(工具:{} 不可用，请直接用 LLM 执行)\n\n上下文：\n{}\n\n输出结果。{}",
-                                    task, at.description, at.tool,
-                                    if ctx.is_empty() { "无" } else { &ctx }, rag);
-                                let mut last_error = String::new();
-                                let mut result = None;
-                                for attempt in 1..=3 {
-                                    match tokio::time::timeout(Duration::from_secs(60),
-                                        llm.invoke(vec![Message::human(&p)], None)
-                                    ).await {
-                                        Ok(Ok(r)) => {
-                                            let t = r.token_usage.as_ref()
-                                                .map(|u| u.total_tokens)
-                                                .unwrap_or_else(|| estimate_token_usage(&p, &r.content));
-                                            result = Some((r.content.clone(), t));
-                                            break;
+                                let tool_ctx = ToolContext {
+                                    config: config.clone(),
+                                    task: task.clone(),
+                                    description: at.description.clone(),
+                                    ctx: ctx.clone(),
+                                    rag: rag.clone(),
+                                    input_template: at.input_template.clone(),
+                                    vector_store: vector_store.clone(),
+                                    cancel: cancel.clone(),
+                                    progress: spawn_progress_tx.clone(),
+                                };
+                                let tool_name = if at.tool.is_empty() { "llm_query" } else { &at.tool };
+                                match registry.get(tool_name) {
+                                    Some(tool) => {
+                                        match tool.execute(&tool_ctx).await {
+                                            Ok(result) => result,
+                                            Err(e) => (e, 0),
                                         }
-                                        Ok(Err(e)) => {
-                                            last_error = e.to_string();
-                                            tracing::warn!("unknown_tool({}) attempt {}/3 failed: {}", at.tool, attempt, last_error);
-                                            if attempt < 3 {
-                                                tokio::time::sleep(std::time::Duration::from_secs([1, 3, 5][attempt - 1])).await;
+                                    }
+                                    None => {
+                                        tracing::warn!("工具 {} 不存在，降级为 llm_query", at.tool);
+                                        match registry.get("llm_query") {
+                                            Some(fallback) => {
+                                                let fallback_ctx = ToolContext {
+                                                    description: format!("(工具:{} 不可用，请直接用 LLM 执行)\n{}", at.tool, at.description),
+                                                    ..tool_ctx
+                                                };
+                                                fallback.execute(&fallback_ctx).await.unwrap_or_else(|e| (e, 0))
                                             }
-                                        }
-                                        Err(_) => {
-                                            last_error = "timeout".to_string();
-                                            tracing::warn!("unknown_tool({}) attempt {}/3 timeout", at.tool, attempt);
-                                            if attempt < 3 {
-                                                tokio::time::sleep(std::time::Duration::from_secs([1, 3, 5][attempt - 1])).await;
-                                            }
+                                            None => (format!("工具 {} 不可用且无降级方案", at.tool), 0),
                                         }
                                     }
                                 }
-                                match result {
-                                    Some(r) => r,
-                                    None => (format!("执行失败(重试3次后): {}", last_error), 0),
-                                }
                             }
-                        }
-                    };
+                        };
 
                         (output, tokens)
                     });
@@ -587,6 +563,17 @@ impl AgentEngine {
                         Ok((output, tokens)) => {
                             let elapsed = task_start.elapsed().as_millis() as u64;
                             tracing::info!(task_name = %task_name, duration_ms = elapsed, tokens = tokens, "任务完成");
+                            // 推送进度事件
+                            if let Some(ref tx) = progress_tx {
+                                let event = serde_json::json!({
+                                    "type": "task_complete",
+                                    "task": task_name,
+                                    "tool": tool_name,
+                                    "duration_ms": elapsed,
+                                    "tokens": tokens,
+                                }).to_string();
+                                let _ = tx.send(event);
+                            }
                             let mut new_state = state;
                             new_state.add_message(MessageEntry::ai(
                                 serde_json::json!({
@@ -603,6 +590,15 @@ impl AgentEngine {
                         Err(e) => {
                             let elapsed = task_start.elapsed().as_millis() as u64;
                             tracing::warn!(task_name = %task_name, error = %e, "任务执行失败");
+                            // 推送失败事件
+                            if let Some(ref tx) = progress_tx {
+                                let event = serde_json::json!({
+                                    "type": "task_error",
+                                    "task": task_name,
+                                    "error": e.to_string(),
+                                }).to_string();
+                                let _ = tx.send(event);
+                            }
                             let mut new_state = state;
                             new_state.add_message(MessageEntry::ai(
                                 serde_json::json!({
@@ -664,6 +660,8 @@ impl AgentEngine {
         context: &[AgentExecResult],
         rag_context: &str,
         vector_store: Option<Arc<QdrantStore>>,
+        cancel: Option<Arc<AtomicBool>>,
+        progress_tx: Option<broadcast::Sender<String>>,
     ) -> Result<Vec<AgentExecResult>, GraphDemoError> {
         let ctx: String = context.iter()
             .map(|r| format!("【{}】\n{}", r.task_name, r.output))
@@ -673,6 +671,7 @@ impl AgentEngine {
         } else {
             format!("\n\n知识库检索结果：\n{}", rag_context)
         };
+        let max_concurrency = config.agent.max_concurrency;
 
         let compiled = Self::build_batch_graph(
             config.clone(),
@@ -681,6 +680,9 @@ impl AgentEngine {
             ctx,
             rag,
             vector_store,
+            max_concurrency,
+            cancel,
+            progress_tx,
         )?;
 
         let initial = AgentState::new(task.to_string());
@@ -698,7 +700,10 @@ impl AgentEngine {
         let batch = Self::ready_batch(&agent_tasks, &done);
         if batch.is_empty() { return Err(GraphDemoError::BuildError("没有可执行的任务".into())); }
 
-        let results = Self::run_batch_with_framework(config, &task, &batch, &[], &rag_context, vector_store).await?;
+        let cancel_flag = get_cancel_flag(&sid);
+        let (progress_tx, _) = broadcast::channel::<String>(32);
+        let progress_tx_clone = progress_tx.clone();
+        let results = Self::run_batch_with_framework(config, &task, &batch, &[], &rag_context, vector_store, Some(cancel_flag.clone()), Some(progress_tx)).await?;
 
         // 路由逻辑：如果本批有决策节点，跳过未选中的分支
         let mut skipped_names: HashSet<String> = HashSet::new();
@@ -741,7 +746,8 @@ impl AgentEngine {
 
         if let Some(ref p) = pool {
             let _ = ensure_agent_tables(p).await;
-            save_agent_session(p, &sid, &task).await;
+            let plan_json = serde_json::to_string(&agent_tasks).unwrap_or_else(|_| "[]".to_string());
+            save_agent_session(p, &sid, &task, &plan_json).await;
             for r in &done_results {
                 save_agent_result(p, &sid, r).await;
             }
@@ -753,9 +759,12 @@ impl AgentEngine {
         };
 
         let all = agent_tasks.clone();
-        store().lock().unwrap().get_or_insert_with(HashMap::new).insert(sid.clone(), BatchState {
+        let batch_state = BatchState {
             task, all, done: done_results.clone(), completed_names, start: Instant::now(), rag_context, review_pending,
-        });
+            cancel: cancel_flag.clone(),
+            progress_tx: Some(progress_tx_clone),
+        };
+        store().lock().unwrap().get_or_insert_with(HashMap::new).insert(sid.clone(), batch_state);
 
         Ok((sid, results, has_more))
     }
@@ -782,11 +791,14 @@ impl AgentEngine {
         let batch = Self::ready_batch(&all, &done_names);
         if batch.is_empty() { return Err(GraphDemoError::BuildError("没有更多可执行任务".into())); }
 
-        let context = {
+        let (context, progress_tx) = {
             let g = store().lock().unwrap();
-            g.as_ref().unwrap().get(sid).map(|s| s.done.clone()).unwrap_or_default()
+            let s = g.as_ref().unwrap().get(sid);
+            let ctx = s.map(|s| s.done.clone()).unwrap_or_default();
+            let tx = s.and_then(|s| s.progress_tx.clone());
+            (ctx, tx)
         };
-        let results = Self::run_batch_with_framework(config, &task, &batch, &context, &rag_context, vector_store).await?;
+        let results = Self::run_batch_with_framework(config, &task, &batch, &context, &rag_context, vector_store, Some(get_cancel_flag(sid)), progress_tx).await?;
 
         let new_review_pending: Vec<AgentTask> = batch.iter()
             .filter(|t| t.task_type == "human_review")
@@ -902,7 +914,7 @@ impl AgentEngine {
                 break;
             }
 
-            let results = Self::run_batch_with_framework(config, &task, &batch, &all_results, &rag_context, vector_store.clone()).await?;
+            let results = Self::run_batch_with_framework(config, &task, &batch, &all_results, &rag_context, vector_store.clone(), None, None).await?;
 
             for r in &results {
                 done.insert(r.task_name.clone());
@@ -950,6 +962,7 @@ impl AgentEngine {
             m.get(sid).map(|s| (s.task.clone(), s.done.clone(), s.start))
         };
         store().lock().unwrap().as_mut().unwrap().remove(sid);
+        remove_cancel_flag(sid);
 
         if let Some(ref p) = pool {
             update_agent_session_status(p, sid, "completed").await;
@@ -998,6 +1011,109 @@ impl AgentEngine {
         }
 
         Ok(())
+    }
+
+    /// ── 查询执行日志 ──
+    pub async fn get_session_logs(pool: &SqlitePool, sid: &str) -> Result<serde_json::Value, GraphDemoError> {
+        let session = sqlx::query_as::<_, (String, String, String, String)>(
+            "SELECT session_id, task, created_at, status FROM agent_sessions WHERE session_id = ?"
+        )
+        .bind(sid)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| GraphDemoError::BuildError(e.to_string()))?;
+
+        let results = sqlx::query_as::<_, (String, String, String, i64, i64)>(
+            "SELECT task_name, tool, output, duration_ms, tokens FROM agent_results WHERE session_id = ? ORDER BY id ASC"
+        )
+        .bind(sid)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| GraphDemoError::BuildError(e.to_string()))?;
+
+        match session {
+            Some((session_id, task, created_at, status)) => {
+                let items: Vec<serde_json::Value> = results.into_iter().map(|(name, tool, output, dur, tok)| {
+                    serde_json::json!({
+                        "task_name": name,
+                        "tool": tool,
+                        "output_preview": output.chars().take(200).collect::<String>(),
+                        "duration_ms": dur,
+                        "tokens": tok,
+                    })
+                }).collect();
+                Ok(serde_json::json!({
+                    "session_id": session_id,
+                    "task": task,
+                    "created_at": created_at,
+                    "status": status,
+                    "results": items,
+                    "total": items.len(),
+                }))
+            }
+            None => Err(GraphDemoError::BuildError("session不存在".into())),
+        }
+    }
+
+    /// ── Token 用量统计 ──
+    pub async fn get_token_stats(pool: &SqlitePool) -> Result<serde_json::Value, GraphDemoError> {
+        let total_sessions = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agent_sessions")
+            .fetch_one(pool).await.unwrap_or(0);
+        let total_tokens = sqlx::query_scalar::<_, Option<i64>>("SELECT SUM(tokens) FROM agent_results")
+            .fetch_one(pool).await.unwrap_or(None).unwrap_or(0);
+        let total_duration = sqlx::query_scalar::<_, Option<i64>>("SELECT SUM(duration_ms) FROM agent_results")
+            .fetch_one(pool).await.unwrap_or(None).unwrap_or(0);
+        let avg_tokens = if total_sessions > 0 { total_tokens / total_sessions } else { 0 };
+
+        Ok(serde_json::json!({
+            "total_sessions": total_sessions,
+            "total_tokens": total_tokens,
+            "total_duration_ms": total_duration,
+            "avg_tokens_per_session": avg_tokens,
+        }))
+    }
+
+    /// ── 获取历史执行列表 ──
+    pub async fn list_sessions(pool: &SqlitePool) -> Result<Vec<serde_json::Value>, GraphDemoError> {
+        let rows = sqlx::query_as::<_, (String, String, String, String)>(
+            "SELECT session_id, task, created_at, status FROM agent_sessions ORDER BY created_at DESC LIMIT 50"
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| GraphDemoError::BuildError(e.to_string()))?;
+
+        Ok(rows.into_iter().map(|(sid, task, created_at, status)| {
+            serde_json::json!({
+                "session_id": sid,
+                "task": task,
+                "created_at": created_at,
+                "status": status,
+            })
+        }).collect())
+    }
+
+    /// ── 获取进度推送 receiver（SSE用） ──
+    pub fn get_progress_receiver(sid: &str) -> Result<broadcast::Receiver<String>, GraphDemoError> {
+        let g = store().lock().unwrap();
+        let m = g.as_ref().ok_or_else(|| GraphDemoError::BuildError("存储未初始化".into()))?;
+        let s = m.get(sid).ok_or_else(|| GraphDemoError::BuildError("session不存在".into()))?;
+        s.progress_tx.as_ref()
+            .map(|tx| tx.subscribe())
+            .ok_or_else(|| GraphDemoError::BuildError("该 session 不支持进度推送".into()))
+    }
+
+    /// ── 取消执行 ──
+    pub fn cancel_session(sid: &str) -> Result<(), GraphDemoError> {
+        set_cancelled(sid);
+        Ok(())
+    }
+
+    /// ── 获取待审核任务列表 ──
+    pub fn get_pending_reviews(sid: &str) -> Result<Vec<AgentTask>, GraphDemoError> {
+        let g = store().lock().unwrap();
+        let m = g.as_ref().ok_or_else(|| GraphDemoError::BuildError("存储未初始化".into()))?;
+        let s = m.get(sid).ok_or_else(|| GraphDemoError::BuildError("session不存在".into()))?;
+        Ok(s.review_pending.clone())
     }
 
     /// ── 兼容旧接口（一次性跑完所有批次） ──
@@ -1103,7 +1219,7 @@ mod tests {
 
         // 单任务
         let batch1 = vec![make_task("A", vec![])];
-        let graph1 = AgentEngine::build_batch_graph(config.clone(), "test".into(), batch1, String::new(), String::new(), None);
+        let graph1 = AgentEngine::build_batch_graph(config.clone(), "test".into(), batch1, String::new(), String::new(), None, 3, None);
         assert!(graph1.is_ok(), "单任务批次应该编译成功");
         let compiled = graph1.unwrap();
         let nodes = compiled.node_names();
@@ -1112,7 +1228,7 @@ mod tests {
 
         // 多任务
         let batch2 = vec![make_task("A", vec![]), make_task("B", vec![]), make_task("C", vec![])];
-        let graph2 = AgentEngine::build_batch_graph(config, "test".into(), batch2, String::new(), String::new(), None);
+        let graph2 = AgentEngine::build_batch_graph(config, "test".into(), batch2, String::new(), String::new(), None, 3, None);
         assert!(graph2.is_ok(), "多任务批次应该编译成功");
         let compiled2 = graph2.unwrap();
         assert_eq!(compiled2.node_names().len(), 4); // dispatch + A + B + C
@@ -1205,6 +1321,8 @@ mod tests {
             batch,
             String::new(),
             String::new(),
+            None,
+            3,
             None,
         );
         assert!(graph.is_ok(), "批次图应该编译成功");

@@ -64,6 +64,10 @@ impl ConversationStore {
             compress_config,
         })
     }
+
+    pub fn pool(&self) -> SqlitePool {
+        self.pool.clone()
+    }
     
     async fn create_tables(pool: &SqlitePool) -> Result<(), ConversationError> {
         sqlx::query(

@@ -557,14 +557,49 @@ impl ApiService {
     }
     
     pub async fn agent_batch_start(&self, task: String, agent_tasks: Vec<AgentTask>, use_rag: bool) -> Result<(String, Vec<AgentExecResult>, bool), ApiError> {
+        let pool = self.conversation_store.pool();
         crate::services::agent_executor::AgentEngine::execute_batch_start(
-            &self.config, task, agent_tasks, String::new(), Some(self.vector_store.clone())
+            &self.config, task, agent_tasks, String::new(), Some(self.vector_store.clone()), Some(pool)
         ).await.map_err(|e| ApiError::SearchError(e.to_string()))
     }
     pub async fn agent_batch_next(&self, sid: &str) -> Result<(Vec<AgentExecResult>, bool), ApiError> {
-        crate::services::agent_executor::AgentEngine::execute_batch_next(&self.config, sid, None).await
+        let pool = self.conversation_store.pool();
+        crate::services::agent_executor::AgentEngine::execute_batch_next(&self.config, sid, None, Some(pool)).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
+    pub async fn agent_cancel(&self, session_id: &str) -> Result<(), ApiError> {
+        let _ = crate::services::agent_executor::AgentEngine::cancel_session(session_id);
+        Ok(())
+    }
+
+    pub async fn agent_session_logs(&self, session_id: &str) -> Result<serde_json::Value, ApiError> {
+        let pool = self.conversation_store.pool();
+        crate::services::agent_executor::AgentEngine::get_session_logs(&pool, session_id).await
+            .map_err(|e| ApiError::SearchError(e.to_string()))
+    }
+
+    pub async fn agent_token_stats(&self) -> Result<serde_json::Value, ApiError> {
+        let pool = self.conversation_store.pool();
+        crate::services::agent_executor::AgentEngine::get_token_stats(&pool).await
+            .map_err(|e| ApiError::SearchError(e.to_string()))
+    }
+
+    pub async fn agent_list_sessions(&self) -> Result<Vec<serde_json::Value>, ApiError> {
+        let pool = self.conversation_store.pool();
+        crate::services::agent_executor::AgentEngine::list_sessions(&pool).await
+            .map_err(|e| ApiError::SearchError(e.to_string()))
+    }
+
+    pub async fn agent_pending_reviews(&self, session_id: &str) -> Result<Vec<AgentTask>, ApiError> {
+        crate::services::agent_executor::AgentEngine::get_pending_reviews(session_id)
+            .map_err(|e| ApiError::SearchError(e.to_string()))
+    }
+
+    pub async fn agent_review(&self, session_id: &str, task_name: &str, approved: bool, feedback: &str) -> Result<(), ApiError> {
+        crate::services::agent_executor::AgentEngine::approve_review(session_id, task_name, approved, feedback).await
+            .map_err(|e| ApiError::SearchError(e.to_string()))
+    }
+
     pub async fn agent_execute_all(&self, task: String, agent_tasks: Vec<AgentTask>, use_rag: bool) -> Result<AgentExecResponse, ApiError> {
         crate::services::agent_executor::AgentEngine::execute_all_batches(
             &self.config, task, agent_tasks, String::new(), Some(self.vector_store.clone())

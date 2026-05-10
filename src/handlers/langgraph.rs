@@ -11,7 +11,13 @@
 
 use crate::handlers::{ApiErrorResponse, AppState};
 use crate::models::*;
-use axum::{extract::State, Json};
+use axum::{
+    extract::State,
+    response::sse::{Event, Sse},
+    Json,
+};
+use futures_util::stream::{self, Stream, StreamExt};
+use std::convert::Infallible;
 use std::sync::Arc;
 
 /// 获取 LangGraph 演示信息
@@ -168,6 +174,111 @@ pub async fn agent_next(
     let sid = request["session_id"].as_str().unwrap_or("");
     let (results, has_next) = state.api.agent_batch_next(sid).await?;
     Ok(Json(serde_json::json!({"results":results,"has_next":has_next})))
+}
+
+/// 查询执行日志
+/// GET /api/agent/sessions/:id/logs
+pub async fn agent_session_logs(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    let result = state.api.agent_session_logs(&session_id).await?;
+    Ok(Json(result))
+}
+
+/// Agent 执行进度推送（SSE）
+/// GET /api/agent/progress/:session_id
+pub async fn agent_progress(
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    use tokio::sync::broadcast;
+    use futures_util::stream::BoxStream;
+
+    let rx = crate::services::agent_executor::AgentEngine::get_progress_receiver(&session_id);
+
+    let stream: BoxStream<Result<Event, Infallible>> = match rx {
+        Ok(rx) => {
+            let init = futures_util::stream::once(async {
+                Ok(Event::default().data("connected").event("connected"))
+            }).boxed();
+            let events = futures_util::stream::unfold(rx, |mut rx| async {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        Some((Ok(Event::default().data(msg).event("progress")), rx))
+                    }
+                    Err(broadcast::error::RecvError::Closed) => None,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        Some((Ok(Event::default().data("lagged").event("error")), rx))
+                    }
+                }
+            }).boxed();
+            init.chain(events).boxed()
+        }
+        Err(_) => {
+            futures_util::stream::once(async {
+                Ok(Event::default().data("session not found").event("error"))
+            }).boxed()
+        }
+    };
+
+    Sse::new(stream)
+}
+
+/// Token 用量统计
+/// GET /api/agent/stats
+pub async fn agent_token_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    let result = state.api.agent_token_stats().await?;
+    Ok(Json(result))
+}
+
+/// 历史执行列表
+/// GET /api/agent/sessions
+pub async fn agent_list_sessions(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<serde_json::Value>>, ApiErrorResponse> {
+    let result = state.api.agent_list_sessions().await?;
+    Ok(Json(result))
+}
+
+/// 取消 Agent 执行
+/// POST /api/agent/cancel
+/// 请求: { session_id }
+pub async fn agent_cancel(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    let session_id = request["session_id"].as_str().unwrap_or("").to_string();
+    state.api.agent_cancel(&session_id).await?;
+    Ok(Json(serde_json::json!({"success": true})))
+}
+
+/// 查询待审核任务
+/// POST /api/agent/pending
+/// 请求: { session_id }
+pub async fn agent_pending(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    let session_id = request["session_id"].as_str().unwrap_or("").to_string();
+    let pending = state.api.agent_pending_reviews(&session_id).await?;
+    Ok(Json(serde_json::json!({"pending": pending})))
+}
+
+/// 人工审批
+/// POST /api/agent/review
+/// 请求: { session_id, task_name, approved, feedback? }
+pub async fn agent_review(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
+    let session_id = request["session_id"].as_str().unwrap_or("").to_string();
+    let task_name = request["task_name"].as_str().unwrap_or("").to_string();
+    let approved = request["approved"].as_bool().unwrap_or(false);
+    let feedback = request["feedback"].as_str().unwrap_or("");
+    state.api.agent_review(&session_id, &task_name, approved, feedback).await?;
+    Ok(Json(serde_json::json!({"success": true})))
 }
 
 /// 执行所有任务（真正并行）
