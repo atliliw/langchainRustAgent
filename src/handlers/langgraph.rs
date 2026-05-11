@@ -164,7 +164,8 @@ pub async fn agent_execute(
         .unwrap_or_default();
     let use_rag = request["use_rag"].as_bool().unwrap_or(false);
     let use_verify = request["use_verify"].as_bool().unwrap_or(false);
-    let (sid, results, has_next) = state.api.agent_batch_start(task, tasks, use_rag, use_verify).await?;
+    let use_subgraph = request["use_subgraph"].as_bool().unwrap_or(false);
+    let (sid, results, has_next) = state.api.agent_batch_start(task, tasks, use_rag, use_verify, use_subgraph).await?;
     Ok(Json(serde_json::json!({"session_id":sid,"results":results,"has_next":has_next})))
 }
 
@@ -293,6 +294,7 @@ pub async fn agent_execute_all(
         .unwrap_or_default();
     let use_rag = request["use_rag"].as_bool().unwrap_or(false);
     let use_verify = request["use_verify"].as_bool().unwrap_or(false);
-    let result = state.api.agent_execute_all(task, tasks, use_rag, use_verify).await?;
+    let use_subgraph = request["use_subgraph"].as_bool().unwrap_or(false);
+    let result = state.api.agent_execute_all(task, tasks, use_rag, use_verify, use_subgraph).await?;
     Ok(Json(result))
 }

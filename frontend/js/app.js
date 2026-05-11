@@ -1691,7 +1691,7 @@ async function runAgentPlan() {
     try {
         const res = await fetch(`${API_BASE}/agent/plan`, {
             method: 'POST', headers: {'Content-Type':'application/json'},
-            body: JSON.stringify({task, use_rag: document.getElementById('agent-rag-toggle').checked, use_routing: document.getElementById('agent-routing-toggle').checked, use_verify: document.getElementById('agent-verify-toggle').checked})
+            body: JSON.stringify({task, use_rag: document.getElementById('agent-rag-toggle').checked, use_routing: document.getElementById('agent-routing-toggle').checked, use_verify: document.getElementById('agent-verify-toggle').checked, use_subgraph: document.getElementById('agent-subgraph-toggle').checked})
         });
         if (!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.error||`${res.status}`); }
         const data = await res.json();
@@ -1758,7 +1758,7 @@ async function agentFetchAndShow(isFirst) {
     try {
         const url = isFirst ? '/api/agent/execute' : '/api/agent/next';
         const body = isFirst
-            ? JSON.stringify({task: _agentPlanData.original_task, agent_tasks: _agentPlanData.tasks, use_rag: document.getElementById('agent-rag-toggle').checked, use_verify: document.getElementById('agent-verify-toggle').checked})
+            ? JSON.stringify({task: _agentPlanData.original_task, agent_tasks: _agentPlanData.tasks, use_rag: document.getElementById('agent-rag-toggle').checked, use_verify: document.getElementById('agent-verify-toggle').checked, use_subgraph: document.getElementById('agent-subgraph-toggle').checked})
             : JSON.stringify({session_id: _agentSessionId});
 
         const res = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body});

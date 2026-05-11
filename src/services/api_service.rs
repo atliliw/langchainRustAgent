@@ -556,10 +556,10 @@ impl ApiService {
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
     
-    pub async fn agent_batch_start(&self, task: String, agent_tasks: Vec<AgentTask>, use_rag: bool, use_verify: bool) -> Result<(String, Vec<AgentExecResult>, bool), ApiError> {
+    pub async fn agent_batch_start(&self, task: String, agent_tasks: Vec<AgentTask>, use_rag: bool, use_verify: bool, use_subgraph: bool) -> Result<(String, Vec<AgentExecResult>, bool), ApiError> {
         let pool = self.conversation_store.pool();
         crate::services::agent_executor::AgentEngine::execute_batch_start(
-            &self.config, task, agent_tasks, String::new(), Some(self.vector_store.clone()), Some(pool), use_verify
+            &self.config, task, agent_tasks, String::new(), Some(self.vector_store.clone()), Some(pool), use_verify, use_subgraph
         ).await.map_err(|e| ApiError::SearchError(e.to_string()))
     }
     pub async fn agent_batch_next(&self, sid: &str) -> Result<(Vec<AgentExecResult>, bool), ApiError> {
@@ -600,9 +600,9 @@ impl ApiService {
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
 
-    pub async fn agent_execute_all(&self, task: String, agent_tasks: Vec<AgentTask>, use_rag: bool, use_verify: bool) -> Result<AgentExecResponse, ApiError> {
+    pub async fn agent_execute_all(&self, task: String, agent_tasks: Vec<AgentTask>, use_rag: bool, use_verify: bool, use_subgraph: bool) -> Result<AgentExecResponse, ApiError> {
         crate::services::agent_executor::AgentEngine::execute_all_batches(
-            &self.config, task, agent_tasks, String::new(), Some(self.vector_store.clone()), use_verify
+            &self.config, task, agent_tasks, String::new(), Some(self.vector_store.clone()), use_verify, use_subgraph
         ).await.map_err(|e| ApiError::SearchError(e.to_string()))
     }
     

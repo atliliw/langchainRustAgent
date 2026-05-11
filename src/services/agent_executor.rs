@@ -114,6 +114,7 @@ pub async fn recover_sessions(pool: &SqlitePool) -> Vec<serde_json::Value> {
             cancel: cancel_flag,
             progress_tx: None,
             use_verify: false,
+            use_subgraph: false,
         };
 
         // 标记已取消（不自动恢复执行，避免意外）
@@ -202,6 +203,7 @@ struct BatchState {
     cancel: Arc<AtomicBool>,
     progress_tx: Option<broadcast::Sender<String>>,
     use_verify: bool,
+    use_subgraph: bool,
 }
 static STORE: Mutex<Option<HashMap<String, BatchState>>> = Mutex::new(None);
 fn store() -> &'static Mutex<Option<HashMap<String, BatchState>>> { &STORE }
@@ -444,6 +446,7 @@ impl AgentEngine {
         cancel: Option<Arc<AtomicBool>>,
         progress_tx: Option<broadcast::Sender<String>>,
         verify_hook: Option<Arc<CompositeVerifyHook>>,
+        use_subgraph: bool,
     ) -> Result<CompiledGraph<AgentState>, GraphDemoError> {
         let mut graph = StateGraph::<AgentState>::new();
         let semaphore = Arc::new(Semaphore::new(max_concurrency));
@@ -689,7 +692,18 @@ impl AgentEngine {
             graph.add_edge(name.clone(), END);
         }
 
-        graph.compile().map_err(|e| GraphDemoError::BuildError(e.to_string()))
+        let flat_graph = graph.compile().map_err(|e| GraphDemoError::BuildError(e.to_string()))?;
+
+        if use_subgraph {
+            // 子图模式：把整个任务图作为子图，嵌入父图
+            let mut parent = StateGraph::<AgentState>::new();
+            parent.add_subgraph_same_state("agent_tasks", flat_graph);
+            parent.add_edge(START, "agent_tasks");
+            parent.add_edge("agent_tasks", END);
+            parent.compile().map_err(|e| GraphDemoError::BuildError(e.to_string()))
+        } else {
+            Ok(flat_graph)
+        }
     }
 
     /// 从 invoke_parallel 的结果中提取每个任务的输出
@@ -728,6 +742,7 @@ impl AgentEngine {
         cancel: Option<Arc<AtomicBool>>,
         progress_tx: Option<broadcast::Sender<String>>,
         use_verify: bool,
+        use_subgraph: bool,
     ) -> Result<Vec<AgentExecResult>, GraphDemoError> {
         let ctx: String = context.iter()
             .map(|r| format!("【{}】\n{}", r.task_name, r.output))
@@ -755,6 +770,7 @@ impl AgentEngine {
             cancel,
             progress_tx,
             verify_hook,
+            use_subgraph,
         )?;
 
         let initial = AgentState::new(task.to_string());
@@ -766,7 +782,7 @@ impl AgentEngine {
 
     /// ── 开始执行（返回第一批结果 + session_id） ──
     /// 使用框架 invoke_parallel 并行执行第一批就绪任务
-    pub async fn execute_batch_start(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>, pool: Option<SqlitePool>, use_verify: bool) -> Result<(String, Vec<AgentExecResult>, bool), GraphDemoError> {
+    pub async fn execute_batch_start(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>, pool: Option<SqlitePool>, use_verify: bool, use_subgraph: bool) -> Result<(String, Vec<AgentExecResult>, bool), GraphDemoError> {
         let sid = Uuid::new_v4().to_string();
         let done: HashSet<String> = HashSet::new();
         let batch = Self::ready_batch(&agent_tasks, &done);
@@ -775,7 +791,7 @@ impl AgentEngine {
         let cancel_flag = get_cancel_flag(&sid);
         let (progress_tx, _) = broadcast::channel::<String>(32);
         let progress_tx_clone = progress_tx.clone();
-        let results = Self::run_batch_with_framework(config, &task, &batch, &[], &rag_context, vector_store, Some(cancel_flag.clone()), Some(progress_tx), use_verify).await?;
+        let results = Self::run_batch_with_framework(config, &task, &batch, &[], &rag_context, vector_store, Some(cancel_flag.clone()), Some(progress_tx), use_verify, use_subgraph).await?;
 
         // 路由逻辑：如果本批有决策节点，跳过未选中的分支
         let mut skipped_names: HashSet<String> = HashSet::new();
@@ -838,6 +854,7 @@ impl AgentEngine {
             cancel: cancel_flag.clone(),
             progress_tx: Some(progress_tx_clone),
             use_verify,
+            use_subgraph,
         };
         store().lock().unwrap().get_or_insert_with(HashMap::new).insert(sid.clone(), batch_state);
 
@@ -866,17 +883,18 @@ impl AgentEngine {
         let batch = Self::ready_batch(&all, &done_names);
         if batch.is_empty() { return Err(GraphDemoError::BuildError("没有更多可执行任务".into())); }
 
-        let (context, progress_tx, use_verify) = {
+        let (context, progress_tx, use_verify, use_subgraph) = {
             let g = store().lock().unwrap();
             let s = g.as_ref().unwrap().get(sid);
             let ctx = s.map(|s| s.done.clone()).unwrap_or_default();
             let tx = s.and_then(|s| s.progress_tx.clone());
             let verify = s.map(|s| s.use_verify).unwrap_or(false);
-            (ctx, tx, verify)
+            let sub = s.map(|s| s.use_subgraph).unwrap_or(false);
+            (ctx, tx, verify, sub)
         };
-        let results = Self::run_batch_with_framework(config, &task, &batch, &context, &rag_context, vector_store, Some(get_cancel_flag(sid)), progress_tx, use_verify).await?;
+        let results = Self::run_batch_with_framework(config, &task, &batch, &context, &rag_context, vector_store, Some(get_cancel_flag(sid)), progress_tx, use_verify, use_subgraph).await?;
 
-        let new_review_pending: Vec<AgentTask> = batch.iter()
+    let new_review_pending: Vec<AgentTask> = batch.iter()
             .filter(|t| t.task_type == "human_review")
             .cloned()
             .collect();
@@ -981,7 +999,7 @@ impl AgentEngine {
 
     /// ── 按依赖分批并行执行：同批任务 invoke_parallel 并行，不同批串行 ──
     /// 例: A → [B, C] → D  => 第一批: A, 第二批: B+C(并行), 第三批: D
-    pub async fn execute_all_batches(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>, use_verify: bool) -> Result<AgentExecResponse, GraphDemoError> {
+    pub async fn execute_all_batches(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>, use_verify: bool, use_subgraph: bool) -> Result<AgentExecResponse, GraphDemoError> {
         let total_start = Instant::now();
 
         let mut done: HashSet<String> = HashSet::new();
@@ -993,7 +1011,7 @@ impl AgentEngine {
                 break;
             }
 
-            let results = Self::run_batch_with_framework(config, &task, &batch, &all_results, &rag_context, vector_store.clone(), None, None, use_verify).await?;
+            let results = Self::run_batch_with_framework(config, &task, &batch, &all_results, &rag_context, vector_store.clone(), None, None, use_verify, use_subgraph).await?;
 
             for r in &results {
                 done.insert(r.task_name.clone());
@@ -1201,7 +1219,7 @@ impl AgentEngine {
     /// ── 兼容旧接口（一次性跑完所有批次） ──
     pub async fn plan_and_execute(config: &Config, task: String) -> Result<AgentExecResponse, GraphDemoError> {
         let plan = Self::plan(config, task.clone(), String::new(), false, false).await?;
-        let (sid, mut all, _) = Self::execute_batch_start(config, task, plan.tasks, String::new(), None, None, false).await?;
+        let (sid, mut all, _) = Self::execute_batch_start(config, task, plan.tasks, String::new(), None, None, false, false).await?;
         loop {
             let (batch, has_more) = Self::execute_batch_next(config, &sid, None, None).await?;
             all.extend(batch);
@@ -1282,6 +1300,10 @@ mod tests {
         let sid = uuid::Uuid::new_v4().to_string();
         store().lock().unwrap().get_or_insert_with(HashMap::new).insert(sid.clone(), BatchState {
             task, all, done, completed_names: completed, start: Instant::now(), rag_context: String::new(), review_pending: Vec::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            progress_tx: None,
+            use_verify: false,
+            use_subgraph: false,
         });
 
         // 验证存储和读取
