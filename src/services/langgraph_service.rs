@@ -166,6 +166,68 @@ impl LangGraphDemoService {
             .map_err(|e| GraphDemoError::BuildError(e.to_string()))
     }
 
+    fn build_subgraph_graph() -> Result<CompiledGraph<AgentState>, GraphDemoError> {
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct ReviewState {
+            content: String,
+            review_result: String,
+            decision: String,
+        }
+        impl StateSchema for ReviewState {}
+
+        let mut sub = StateGraph::<ReviewState>::new();
+        sub.add_node_fn("审核内容", |state| Ok(StateUpdate::full(state.clone())));
+        sub.add_node_fn("输出结果", |state| Ok(StateUpdate::full(state.clone())));
+        sub.add_edge(START, "审核内容");
+        sub.add_edge("审核内容", "输出结果");
+        sub.add_edge("输出结果", END);
+        let compiled_sub = sub.compile()
+            .map_err(|e| GraphDemoError::BuildError(e.to_string()))?;
+
+        let mut parent = StateGraph::<AgentState>::new();
+        parent.add_node_fn("生成内容", |state| Ok(StateUpdate::full(state.clone())));
+        parent.add_subgraph(
+            "质量审核", compiled_sub,
+            |p: &AgentState| -> ReviewState {
+                ReviewState { content: p.output.clone().unwrap_or_default(), review_result: String::new(), decision: String::new() }
+            },
+            |s: &ReviewState, p: &mut AgentState| {
+                p.add_message(MessageEntry::ai(format!("审核结果：{}", s.review_result)));
+            },
+        );
+        parent.add_edge(START, "生成内容");
+        parent.add_edge("生成内容", "质量审核");
+        parent.add_edge("质量审核", END);
+        parent.compile().map_err(|e| GraphDemoError::BuildError(e.to_string()))
+    }
+
+    fn build_llm_conditional_graph() -> Result<CompiledGraph<AgentState>, GraphDemoError> {
+        use langchainrust::langgraph::FunctionRouter;
+        let router = FunctionRouter::new(|state: &AgentState| {
+            if state.input.len() > 10 { "tech".to_string() } else { "general".to_string() }
+        });
+        let mut graph = StateGraph::<AgentState>::new();
+        graph.set_entry_point("分析问题");
+        graph.add_node_fn("分析问题", |state| Ok(StateUpdate::full(state.clone())));
+        graph.add_node_fn("技术路线", |state| Ok(StateUpdate::full(state.clone())));
+        graph.add_node_fn("通用路线", |state| Ok(StateUpdate::full(state.clone())));
+        graph.add_node_fn("生成回答", |state| Ok(StateUpdate::full(state.clone())));
+        graph.add_edge(START, "分析问题");
+        graph.set_conditional_router("length_router", router);
+        graph.add_conditional_edges(
+            "分析问题", "length_router",
+            std::collections::HashMap::from([
+                ("tech".to_string(), "技术路线".to_string()),
+                ("general".to_string(), "通用路线".to_string()),
+            ]),
+            Some("通用路线".to_string()),
+        );
+        graph.add_edge("技术路线", "生成回答");
+        graph.add_edge("通用路线", "生成回答");
+        graph.add_edge("生成回答", END);
+        graph.compile().map_err(|e| GraphDemoError::BuildError(e.to_string()))
+    }
+
     /// ──────────────────── 可视化接口 ────────────────────
 
     pub fn get_graph_structure(mode: &str) -> Result<serde_json::Value, GraphDemoError> {
@@ -173,6 +235,8 @@ impl LangGraphDemoService {
             "parallel" => Self::build_parallel_graph()?,
             "conditional" => Self::build_conditional_graph()?,
             "stream" => Self::build_stream_graph()?,
+            "subgraph" => Self::build_subgraph_graph()?,
+            "llm_conditional" => Self::build_llm_conditional_graph()?,
             _ => return Err(GraphDemoError::BuildError(format!("未知模式: {}", mode))),
         };
         Ok(compiled.visualize_json())
@@ -183,6 +247,8 @@ impl LangGraphDemoService {
             "parallel" => Self::build_parallel_graph()?,
             "conditional" => Self::build_conditional_graph()?,
             "stream" => Self::build_stream_graph()?,
+            "subgraph" => Self::build_subgraph_graph()?,
+            "llm_conditional" => Self::build_llm_conditional_graph()?,
             _ => return Err(GraphDemoError::BuildError(format!("未知模式: {}", mode))),
         };
         let json = compiled.visualize_json();

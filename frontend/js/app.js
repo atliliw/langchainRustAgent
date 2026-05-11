@@ -1240,6 +1240,8 @@ const LG_MODE = {
     parallel: { name: '并行执行', color: '#667eea', desc: 'FanOut → 3个任务同时跑' },
     conditional: { name: '条件路由', color: '#f5576c', desc: '根据输入长度动态选路径' },
     stream: { name: '流式执行', color: '#4facfe', desc: 'step1→step2→step3 逐步执行' },
+    subgraph: { name: '子图', color: '#059669', desc: '父图嵌套子图，独立状态类型' },
+    llm_conditional: { name: 'LLM 路由', color: '#d97706', desc: 'LLM 根据输入内容决策路由' },
 };
 
 async function showLangGraphStructure(mode) {
@@ -1295,6 +1297,13 @@ function buildAnnotations(mode, data) {
                 ann[e.node_name] = { label: `执行中`, ms: e.timestamp_ms };
             }
         });
+    } else if (mode === 'subgraph') {
+        ann['生成内容'] = { label: '父图节点', ms: 0 };
+        ann['质量审核'] = { label: '子图入口', ms: 0 };
+    } else if (mode === 'llm_conditional') {
+        (data.steps || []).forEach((s, i) => {
+            ann[`step${i}`] = { label: s, ms: 0 };
+        });
     }
     return ann;
 }
@@ -1335,6 +1344,24 @@ function renderExecResults(mode, data) {
                     <td style="padding:8px;border:1px solid #e2e8f0;">${e.timestamp_ms}</td>
                 </tr>`).join('')}</tbody>
             </table>
+        </div>`;
+    } else if (mode === 'subgraph') {
+        html += `<div style="border:1px solid #e2e8f0;padding:15px;border-radius:8px;">
+            <p><strong>输入：</strong>${escapeHtml(data.input)}</p>
+            <p><strong>生成内容：</strong>${escapeHtml(data.generated_content)}</p>
+            <p><strong>审核结果：</strong>${escapeHtml(data.review_result)}</p>
+            <p><strong>总耗时：</strong>${data.total_duration_ms}ms</p>
+            <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px;margin-top:10px;">
+                <strong style="color:#059669;">子图说明：</strong>
+                父图「生成内容」节点执行完后，数据传入子图「质量审核」。子图用自己的 ReviewState（独立状态类型）完成审核，结果写回父图。
+            </div>
+        </div>`;
+    } else if (mode === 'llm_conditional') {
+        html += `<div style="border:1px solid #e2e8f0;padding:15px;border-radius:8px;">
+            <p><strong>输入：</strong>${escapeHtml(data.input)}</p>
+            <p><strong>路由选择：</strong>${escapeHtml(data.route_taken)}</p>
+            <p><strong>输出：</strong>${escapeHtml(data.output)}</p>
+            <p><strong>总耗时：</strong>${data.total_duration_ms}ms</p>
         </div>`;
     }
     return html;

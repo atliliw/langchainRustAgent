@@ -355,7 +355,7 @@ impl Config {
             api_key: self.embedding.api_key.clone(),
             base_url: self.embedding.base_url.clone(),
             model: self.embedding.model.clone(),
-            batch_size: 100,
+            batch_size: 25,
         }
     }
 
