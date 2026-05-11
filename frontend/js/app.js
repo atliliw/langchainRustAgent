@@ -1592,50 +1592,62 @@ async function loadDocumentsByTag(tag) {
 
 let _agentPlanData = null;
 
-// ★ 执行所有任务（真正并行）
+// ★ 执行所有任务（自动逐步执行，带实时进度）
 async function runAgentExecute() {
     if (!_agentPlanData) { showToast('请先规划'); return; }
+    _agentCancelled = false;
     const resDiv = document.getElementById('agent-results');
-    resDiv.innerHTML = '<div style="text-align:center;padding:30px;color:#8b5cf6;">⏳ 并行执行所有任务中...</div>';
+    resDiv.innerHTML = '<div style="text-align:center;padding:30px;color:#8b5cf6;">'
+        + '<div>⏳ 正在逐步执行所有任务...</div>'
+        + '<div style="margin-top:10px;"><button class="btn" onclick="cancelAgentExecution()" style="background:#ef4444;color:white;padding:8px 20px;">✕ 取消</button></div></div>';
 
-    try {
-        const res = await fetch(`${API_BASE}/agent/execute_all`, {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({
-                task: _agentPlanData.original_task,
-                agent_tasks: _agentPlanData.tasks,
-                use_rag: document.getElementById('agent-rag-toggle').checked,
-                use_verify: document.getElementById('agent-verify-toggle').checked
-            })
-        });
-        if (!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.error||`${res.status}`); }
-        const data = await res.json();
+    await agentStepExecute();
+    while (_agentSessionId && !_agentCancelled) {
+        await new Promise(r => setTimeout(r, 1500));
+        if (_agentCancelled) break;
+        try {
+            const res = await fetch('/api/agent/next', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({session_id: _agentSessionId})
+            });
+            if (_agentCancelled) break;
+            const data = await res.json();
+            if (!res.ok) { break; }
+            (data.results || []).forEach(r => _agentAllResults.push(r));
 
-        const annotations = {};
-        (data.results || []).forEach(r => { annotations[r.task_name] = {label: r.output.substring(0,30), ms: 0}; });
-        document.getElementById('agent-container').innerHTML = renderGraphHtml(_agentPlanData.graph_structure, annotations);
+            const annotations = {};
+            _agentAllResults.forEach(r => { annotations[r.task_name] = {label: r.output.substring(0,30), ms: 0}; });
+            document.getElementById('agent-container').innerHTML = renderGraphHtml(_agentPlanData.graph_structure, annotations);
 
-        let html = '<div style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;margin-top:10px;">';
-        html += '<h4 style="margin:0 0 10px 0;color:#7c3aed;">并行执行结果</h4>';
-        html += `<div style="font-size:13px;color:#64748b;margin-bottom:10px;">⏱ ${data.total_duration_ms}ms | 🪙 ${data.total_tokens} tokens</div>`;
-        html += '<table style="width:100%"><thead><tr style="background:#f5f3ff;"><th>任务</th><th>输出</th><th style="width:100px;">耗时</th><th style="width:60px;">Token</th></tr></thead><tbody>';
-        (data.results || []).forEach(r => {
-            html += '<tr><td style="padding:8px;font-weight:bold;">' + escapeHtml(r.task_name) + '</td>';
-            html += '<td style="padding:8px;font-size:13px;">' + escapeHtml(r.output) + '</td>';
-            html += '<td style="padding:4px;font-size:11px;color:#94a3b8;text-align:right;">' + (r.duration_ms||0) + 'ms</td>';
-            html += '<td style="padding:4px;font-size:11px;color:#94a3b8;text-align:right;">' + (r.tokens||0) + '</td></tr>';
-        });
-        html += '</tbody></table></div>';
-        if (data.final_answer) {
-            html += '<div style="border:1px solid #d1fae5;background:#ecfdf5;border-radius:8px;padding:15px;margin-top:10px;">';
-            html += '<strong style="color:#059669;">最终答案：</strong><br>' + escapeHtml(data.final_answer) + '</div>';
-        }
-        resDiv.innerHTML = html;
-    } catch (e) {
-        resDiv.innerHTML = '<div style="color:#e94560;padding:20px;">❌ ' + escapeHtml(e.message) + '</div>';
+            let html = '<div id="agent-results-table" style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;margin-top:10px;">';
+            html += '<h4 style="margin:0 0 10px 0;color:#7c3aed;">执行结果</h4>';
+            html += '<table style="width:100%"><thead><tr style="background:#f5f3ff;"><th>任务</th><th>输出</th><th style="width:60px;">验证</th><th style="width:70px;">耗时/Token</th></tr></thead><tbody>';
+            _agentAllResults.forEach(r => {
+                const v = r.verify_retries || 0;
+                const vIcon = v === 0 ? '<span title="未验证或一次通过">\u2014</span>' : (v >= 3 ? '<span style="color:#ef4444;" title="验证失败3次">\u26A0\uFE0F</span>' : '<span style="color:#f59e0b;" title="验证后重试' + v + '次">\uD83D\uDD04' + v + '</span>');
+                html += '<tr><td style="padding:8px;font-weight:bold;">' + escapeHtml(r.task_name) + '</td>';
+                html += '<td style="padding:8px;font-size:13px;">' + escapeHtml(r.output) + '</td>';
+                html += '<td style="padding:4px;font-size:12px;text-align:center;">' + vIcon + '</td>';
+                html += '<td style="padding:4px;font-size:10px;color:#94a3b8;text-align:center;line-height:1.6;">' + (r.duration_ms||0) + 'ms<br>' + (r.tokens||0) + 't</td></tr>';
+            });
+            html += '</tbody></table>';
+            if (_agentCancelled) {
+                html += '<div style="padding:10px;text-align:center;"><span style="color:#ef4444;font-weight:bold;">✕ 已取消</span></div>';
+            } else if (data.has_next) {
+                html += '<div style="padding:10px;text-align:center;color:#8b5cf6;">⏳ 执行下一批...</div>';
+            } else {
+                html += '<div style="padding:10px;text-align:center;"><span style="color:#10b981;font-weight:bold;">\u2705 全部完成</span></div>';
+            }
+            html += '</div>';
+            const execArea = document.getElementById('agent-exec-area');
+            if (execArea) execArea.innerHTML = html;
+
+            if (!data.has_next) break;
+        } catch(e) { break; }
     }
 }
 
+// ──── Agent 规划 ────
 async function runAgentPlan() {
     const task = document.getElementById('agent-input').value.trim();
     if (!task) { showToast('请输入任务'); return; }
@@ -1661,27 +1673,26 @@ async function runAgentPlan() {
         document.getElementById('agent-graph-title').textContent = `📋 ${escapeHtml(data.original_task)}`;
         container.innerHTML = renderGraphHtml(data.graph_structure, {});
 
-        let html = `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;margin-top:10px;">
-            <table style="width:100%;border-collapse:collapse;">
-            <thead><tr style="background:#f5f3ff;">
-                <th style="padding:8px;border:1px solid #e2e8f0;">任务</th>
-                <th style="padding:8px;border:1px solid #e2e8f0;">工具</th>
-                <th style="padding:8px;border:1px solid #e2e8f0;">依赖</th>
-                <th style="padding:8px;border:1px solid #e2e8f0;">输入说明</th>
-            </tr></thead>
-            <tbody>`;
+        let html = '<div style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;margin-top:10px;">'
+            + '<table style="width:100%;border-collapse:collapse;">'
+            + '<thead><tr style="background:#f5f3ff;">'
+            + '<th style="padding:8px;border:1px solid #e2e8f0;">任务</th>'
+            + '<th style="padding:8px;border:1px solid #e2e8f0;">工具</th>'
+            + '<th style="padding:8px;border:1px solid #e2e8f0;">依赖</th>'
+            + '<th style="padding:8px;border:1px solid #e2e8f0;">输入说明</th>'
+            + '</tr></thead><tbody>';
         data.tasks.forEach(t => {
-            html += `<tr><td style="padding:8px;border:1px solid #e2e8f0;"><strong>${escapeHtml(t.name)}</strong><br><span style="font-size:12px;color:#64748b;">${escapeHtml(t.description)}</span></td>
-                <td style="padding:8px;border:1px solid #e2e8f0;"><span style="background:#ede9fe;padding:2px 8px;border-radius:4px;font-size:12px;">${escapeHtml(t.tool)}</span></td>
-                <td style="padding:8px;border:1px solid #e2e8f0;font-size:12px;">${(t.depends_on||[]).join(', ') || '无'}</td>
-                <td style="padding:8px;border:1px solid #e2e8f0;font-size:12px;color:#475569;">${escapeHtml(t.input_template)}</td></tr>`;
+            html += '<tr><td style="padding:8px;border:1px solid #e2e8f0;"><strong>' + escapeHtml(t.name) + '</strong><br><span style="font-size:12px;color:#64748b;">' + escapeHtml(t.description) + '</span></td>'
+                + '<td style="padding:8px;border:1px solid #e2e8f0;"><span style="background:#ede9fe;padding:2px 8px;border-radius:4px;font-size:12px;">' + escapeHtml(t.tool) + '</span></td>'
+                + '<td style="padding:8px;border:1px solid #e2e8f0;font-size:12px;">' + ((t.depends_on||[]).join(', ') || '无') + '</td>'
+                + '<td style="padding:8px;border:1px solid #e2e8f0;font-size:12px;color:#475569;">' + escapeHtml(t.input_template) + '</td></tr>';
         });
-        html += `</tbody></table></div>`;
-        html += `<button class="btn" onclick="agentStepExecute()" style="background:#8b5cf6;color:white;margin-top:10px;padding:12px;width:100%;">▶ 开始执行</button>`;
+        html += '</tbody></table></div>';
+        html += '<button class="btn" onclick="agentStepExecute()" style="background:#8b5cf6;color:white;margin-top:10px;padding:12px;width:100%;">▶ 开始执行</button>';
         results.innerHTML = html;
         detail.style.display = 'block';
     } catch (e) {
-        container.innerHTML = `<div style="color:#e94560;text-align:center;padding:20px;">${e.message}</div>`;
+        container.innerHTML = '<div style="color:#e94560;text-align:center;padding:20px;">' + e.message + '</div>';
     }
 }
 
@@ -1840,20 +1851,23 @@ async function agentFetchAndShow(isFirst) {
 }
 
 // 取消 Agent 执行
+let _agentCancelled = false;
+
 async function cancelAgentExecution() {
-    if (!_agentSessionId) { showToast('没有正在执行的任务'); return; }
-    try {
-        const res = await fetch('/api/agent/cancel', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({session_id: _agentSessionId})
-        });
-        if (!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.error||'取消失败'); }
-        showToast('✕ 已取消执行');
-        disconnectAgentSSE();
-        document.querySelectorAll('#agent-results-table .btn').forEach(b => b.disabled = true);
-    } catch (e) {
-        showToast('❌ ' + e.message);
+    _agentCancelled = true;
+    disconnectAgentSSE();
+    if (_agentSessionId) {
+        try {
+            await fetch('/api/agent/cancel', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({session_id: _agentSessionId})
+            });
+        } catch(e) {}
     }
+    document.querySelectorAll('#agent-results-table .btn, #batch-loading').forEach(b => {
+        if (b.style) b.style.display = 'none';
+    });
+    showToast('✕ 已取消执行');
 }
 
 // 提交人工审批
