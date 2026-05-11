@@ -6,7 +6,7 @@
 <meta http-equiv="Pragma" content="no-cache">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LangChainRust Demo - 向量搜索 + RAG 对话</title>
-    <link rel="stylesheet" href="css/style.css?t=20260510v2">
+    <link rel="stylesheet" href="css/style.css?t=20260510v3">
 </head>
 <body>
     <button class="dark-mode-toggle" onclick="toggleDarkMode()">🌙 深色模式</button>
@@ -234,6 +234,9 @@
                     <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#64748b;">
                         <input type="checkbox" id="agent-routing-toggle"> 🔀 条件路由（决策节点动态选路径）
                     </label>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#64748b;">
+                        <input type="checkbox" id="agent-verify-toggle"> ☑ 自检验证（Verify）
+                    </label>
                 </div>
             </div>
             <div id="agent-viz" style="background:#fff;border:2px solid #e2e8f0;border-radius:12px;padding:20px;margin-bottom:15px;display:none;">
@@ -246,6 +249,7 @@
             <div id="agent-plan-detail" style="display:none;">
                 <button class="btn" onclick="runAgentExecute()" style="background:#8b5cf6;color:white;margin-bottom:15px;">▶ 执行所有任务</button>
             </div>
+            <div id="agent-progress" style="display:none;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-bottom:10px;background:#fafafa;"></div>
             <div id="agent-results"></div>
             <div id="agent-history" style="display:none;margin-top:10px;"></div>
             <div id="agent-stats" style="display:none;margin-top:10px;"></div>
@@ -462,7 +466,7 @@
         </div>
     </div>
     
-    <script src="js/app.js?t=20260510v2"></script>
+    <script src="js/app.js?t=20260510v3"></script>
     <script src="js/aggregate.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </body>

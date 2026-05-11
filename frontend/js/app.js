@@ -1604,7 +1604,8 @@ async function runAgentExecute() {
             body: JSON.stringify({
                 task: _agentPlanData.original_task,
                 agent_tasks: _agentPlanData.tasks,
-                use_rag: document.getElementById('agent-rag-toggle').checked
+                use_rag: document.getElementById('agent-rag-toggle').checked,
+                use_verify: document.getElementById('agent-verify-toggle').checked
             })
         });
         if (!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.error||`${res.status}`); }
@@ -1651,7 +1652,7 @@ async function runAgentPlan() {
     try {
         const res = await fetch(`${API_BASE}/agent/plan`, {
             method: 'POST', headers: {'Content-Type':'application/json'},
-            body: JSON.stringify({task, use_rag: document.getElementById('agent-rag-toggle').checked, use_routing: document.getElementById('agent-routing-toggle').checked})
+            body: JSON.stringify({task, use_rag: document.getElementById('agent-rag-toggle').checked, use_routing: document.getElementById('agent-routing-toggle').checked, use_verify: document.getElementById('agent-verify-toggle').checked})
         });
         if (!res.ok) { const e=await res.json().catch(()=>({})); throw new Error(e.error||`${res.status}`); }
         const data = await res.json();
@@ -1696,12 +1697,14 @@ async function agentStepExecute() {
 }
 
 async function agentNextBatch() {
-    document.querySelectorAll('#agent-results-table .btn, #agent-results-table span').forEach(b => b.remove());
+    const tbl = document.getElementById('agent-results-table');
+    if (!tbl) { showToast('请先执行第一批任务'); return; }
+    tbl.querySelectorAll('.btn, span').forEach(b => b.remove());
     const el = document.createElement('div');
     el.id = 'batch-loading';
     el.style.cssText = 'text-align:center;padding:20px;color:#8b5cf6;';
     el.textContent = '⏳ 执行中...';
-    document.getElementById('agent-results-table').appendChild(el);
+    tbl.appendChild(el);
     await agentFetchAndShow(false);
 }
 
@@ -1717,7 +1720,7 @@ async function agentFetchAndShow(isFirst) {
     try {
         const url = isFirst ? '/api/agent/execute' : '/api/agent/next';
         const body = isFirst
-            ? JSON.stringify({task: _agentPlanData.original_task, agent_tasks: _agentPlanData.tasks, use_rag: document.getElementById('agent-rag-toggle').checked})
+            ? JSON.stringify({task: _agentPlanData.original_task, agent_tasks: _agentPlanData.tasks, use_rag: document.getElementById('agent-rag-toggle').checked, use_verify: document.getElementById('agent-verify-toggle').checked})
             : JSON.stringify({session_id: _agentSessionId});
 
         const res = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body});
@@ -1736,10 +1739,13 @@ async function agentFetchAndShow(isFirst) {
 
         let html = '<div id="agent-results-table" style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;margin-top:10px;">';
         html += '<h4 style="margin:0 0 10px 0;color:#7c3aed;">执行结果</h4>';
-        html += '<table style="width:100%"><thead><tr style="background:#f5f3ff;"><th>任务</th><th>输出</th><th style="width:70px;">耗时/Token</th></tr></thead><tbody>';
+        html += '<table style="width:100%"><thead><tr style="background:#f5f3ff;"><th>任务</th><th>输出</th><th style="width:60px;">验证</th><th style="width:70px;">耗时/Token</th></tr></thead><tbody>';
         _agentAllResults.forEach(r => {
+            const v = r.verify_retries || 0;
+            const vIcon = v === 0 ? '<span title="未验证或一次通过">—</span>' : (v >= 3 ? '<span style="color:#ef4444;" title="验证失败3次">⚠️</span>' : '<span style="color:#f59e0b;" title="验证后重试' + v + '次">🔄' + v + '</span>');
             html += '<tr><td style="padding:8px;font-weight:bold;">' + escapeHtml(r.task_name) + '</td>';
             html += '<td style="padding:8px;font-size:13px;">' + escapeHtml(r.output) + '</td>';
+            html += '<td style="padding:4px;font-size:12px;text-align:center;">' + vIcon + '</td>';
             html += '<td style="padding:4px;font-size:10px;color:#94a3b8;text-align:center;line-height:1.6;">' + (r.duration_ms||0) + 'ms<br>' + (r.tokens||0) + 't</td></tr>';
         });
         html += '</tbody></table>';
@@ -1803,9 +1809,14 @@ async function agentFetchAndShow(isFirst) {
             const tbody = document.querySelector('#agent-results-table tbody');
             if (tbody) {
                 (data.results || []).forEach(r => {
+                    const v = r.verify_retries || 0;
+                    const vIcon = v === 0 ? '<span title="未验证或一次通过">—</span>' : (v >= 3 ? '<span style="color:#ef4444;" title="验证失败3次">⚠️</span>' : '<span style="color:#f59e0b;" title="验证后重试' + v + '次">🔄' + v + '</span>');
                     let row = document.createElement('tr');
+                    const rv = r.verify_retries || 0;
+                    const rIcon = rv === 0 ? '<span title="未验证或一次通过">--</span>' : (rv >= 3 ? '<span style="color:#ef4444;" title="验证失败3次">\u26A0\uFE0F</span>' : '<span style="color:#f59e0b;" title="验证后重试'+rv+'次">\uD83D\uDD04'+rv+'</span>');
                     row.innerHTML = '<td style="padding:8px;font-weight:bold;">' + escapeHtml(r.task_name) + '</td>'
                         + '<td style="padding:8px;font-size:13px;">' + escapeHtml(r.output) + '</td>'
+                        + '<td style="padding:4px;font-size:12px;text-align:center;">' + rIcon + '</td>'
                         + '<td style="padding:4px;font-size:10px;color:#94a3b8;text-align:center;line-height:1.6;">' + (r.duration_ms||0) + 'ms<br>' + (r.tokens||0) + 't</td>';
                     tbody.appendChild(row);
                 });
@@ -1819,7 +1830,8 @@ async function agentFetchAndShow(isFirst) {
                 } else {
                     footer.innerHTML = '<span style="color:#10b981;font-weight:bold;">✅ 全部完成</span>';
                 }
-                document.querySelector('#agent-results-table').appendChild(footer);
+                const tbl2 = document.querySelector('#agent-results-table');
+                if (tbl2) tbl2.appendChild(footer);
             }
         }
     } catch (e) {
@@ -1883,26 +1895,60 @@ async function submitReview(taskName, approved) {
     }
 }
 
-// ──── Agent SSE 连接 ────
+// ──── Agent SSE 连接 + 实时进度面板 ────
 let _agentEventSource = null;
+let _agentProgressTasks = {};  // task_name -> { status, tool }
+
+function renderProgressPanel() {
+    const panel = document.getElementById('agent-progress');
+    if (!panel) return;
+    const names = Object.keys(_agentProgressTasks);
+    if (names.length === 0) { panel.style.display = 'none'; return; }
+    panel.style.display = 'block';
+    let html = '<div style="font-size:12px;font-weight:bold;color:#4f46e5;margin-bottom:6px;">▶ 执行进度</div>';
+    names.forEach(name => {
+        const t = _agentProgressTasks[name];
+        let icon, color;
+        if (t.status === 'running') { icon = '⏳'; color = '#8b5cf6'; }
+        else if (t.status === 'done') { icon = '✅'; color = '#10b981'; }
+        else if (t.status === 'error') { icon = '❌'; color = '#ef4444'; }
+        else { icon = '⏸️'; color = '#94a3b8'; }
+        const dur = t.duration_ms ? ` <span style="font-size:10px;color:#94a3b8;">${t.duration_ms}ms</span>` : '';
+        html += `<div style="display:flex;align-items:center;gap:6px;padding:3px 0;font-size:13px;color:${color};">`
+            + `<span>${icon}</span><span style="flex:1;">${escapeHtml(name)}</span>`
+            + `<span style="font-size:11px;color:#94a3b8;">${t.tool || ''}</span>${dur}</div>`;
+    });
+    panel.innerHTML = html;
+}
 
 function connectAgentSSE(sessionId) {
     disconnectAgentSSE();
     if (!sessionId) return;
+    _agentProgressTasks = {};
+    if (_agentPlanData && _agentPlanData.tasks) {
+        _agentPlanData.tasks.forEach(t => {
+            _agentProgressTasks[t.name] = { status: 'waiting', tool: t.tool, duration_ms: 0 };
+        });
+        renderProgressPanel();
+    }
     const url = `${API_BASE}/agent/progress/${encodeURIComponent(sessionId)}`;
     _agentEventSource = new EventSource(url);
     _agentEventSource.addEventListener('progress', (e) => {
         try {
             const data = JSON.parse(e.data);
-            if (data.type === 'task_complete') {
-                showToast(`✅ ${data.task} 完成 (${data.duration_ms}ms)`);
+            if (data.type === 'task_start') {
+                _agentProgressTasks[data.task] = { status: 'running', tool: data.tool, duration_ms: 0 };
+                renderProgressPanel();
+            } else if (data.type === 'task_complete') {
+                _agentProgressTasks[data.task] = { status: 'done', tool: data.tool, duration_ms: data.duration_ms };
+                renderProgressPanel();
             } else if (data.type === 'task_error') {
-                showToast(`❌ ${data.task} 失败`);
+                _agentProgressTasks[data.task] = { status: 'error', tool: data.tool, duration_ms: 0 };
+                renderProgressPanel();
             }
         } catch (err) { /* ignore parse errors */ }
     });
     _agentEventSource.addEventListener('error', () => {
-        // SSE 断开是正常的（任务结束），自动清理
         disconnectAgentSSE();
     });
 }

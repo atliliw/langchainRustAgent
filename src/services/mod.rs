@@ -9,6 +9,7 @@ pub mod langgraph_service;    // LangGraph 状态图演示
 pub mod aggregate_service;    // AI 聚合采集
 pub mod agent_executor;       // 真实 Agent 执行引擎
 pub mod tools;                // Agent 工具系统（可扩展工具注册）
+pub mod verify;               // Agent 输出验证钩子
 pub mod pageindex;            // PageIndex 无向量 RAG
 
 pub use api_service::ApiService;

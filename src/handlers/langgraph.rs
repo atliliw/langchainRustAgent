@@ -163,7 +163,8 @@ pub async fn agent_execute(
     let tasks: Vec<AgentTask> = serde_json::from_value(request["agent_tasks"].clone())
         .unwrap_or_default();
     let use_rag = request["use_rag"].as_bool().unwrap_or(false);
-    let (sid, results, has_next) = state.api.agent_batch_start(task, tasks, use_rag).await?;
+    let use_verify = request["use_verify"].as_bool().unwrap_or(false);
+    let (sid, results, has_next) = state.api.agent_batch_start(task, tasks, use_rag, use_verify).await?;
     Ok(Json(serde_json::json!({"session_id":sid,"results":results,"has_next":has_next})))
 }
 
@@ -291,6 +292,7 @@ pub async fn agent_execute_all(
     let tasks: Vec<AgentTask> = serde_json::from_value(request["agent_tasks"].clone())
         .unwrap_or_default();
     let use_rag = request["use_rag"].as_bool().unwrap_or(false);
-    let result = state.api.agent_execute_all(task, tasks, use_rag).await?;
+    let use_verify = request["use_verify"].as_bool().unwrap_or(false);
+    let result = state.api.agent_execute_all(task, tasks, use_rag, use_verify).await?;
     Ok(Json(result))
 }

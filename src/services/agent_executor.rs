@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::errors::GraphDemoError;
 use crate::models::*;
 use crate::services::tools::{ToolRegistry, ToolContext};
+use crate::services::verify::{CompositeVerifyHook, VerifyHook};
 use crate::stores::QdrantStore;
 use langchainrust::langgraph::{
     AgentState, CompiledGraph, MessageEntry, ParallelInvocation,
@@ -95,6 +96,7 @@ pub async fn recover_sessions(pool: &SqlitePool) -> Vec<serde_json::Value> {
                 duration_ms: dur as u64,
                 tokens: tok as usize,
                 input_summary: String::new(),
+                verify_retries: 0,
             }
         }).collect();
 
@@ -111,6 +113,7 @@ pub async fn recover_sessions(pool: &SqlitePool) -> Vec<serde_json::Value> {
             review_pending: Vec::new(),
             cancel: cancel_flag,
             progress_tx: None,
+            use_verify: false,
         };
 
         // 标记已取消（不自动恢复执行，避免意外）
@@ -198,6 +201,7 @@ struct BatchState {
     #[allow(dead_code)]
     cancel: Arc<AtomicBool>,
     progress_tx: Option<broadcast::Sender<String>>,
+    use_verify: bool,
 }
 static STORE: Mutex<Option<HashMap<String, BatchState>>> = Mutex::new(None);
 fn store() -> &'static Mutex<Option<HashMap<String, BatchState>>> { &STORE }
@@ -294,17 +298,24 @@ impl AgentEngine {
 
         let routing_section = if use_routing {
             "注意：如果任务需要根据中间结果决定下一步，必须创建 type=decision 的决策节点。\n\
-             决策节点不需要 tool，通过 routes 定义走向（key=结果, value=下一个任务）。\n\
-             routes 中的所有 value 必须在同一个任务列表中创建对应的子任务，每个子任务用 depends_on 指向决策节点。\n\
+             决策节点不需要 tool，通过 routes 定义走向（key=结果, value=[任务1, 任务2, ...]）。\n\
+             routes 中每个 value 是任务名数组，只有数组里的任务才会受路由控制。\n\
+             不选中的路由上的所有任务会被自动跳过（包括它们下游的任务）。\
+             不在任何路由里的任务不受影响，依赖满足就会正常执行。\n\
+             规则：只把「需要条件判断才执行」的任务放路由里，始终要执行的（如最终汇总）不要放路由里。\n\
              如果任务需要人工审批才能继续，创建 type=human_review 的审核节点。\n\
-             示例：调研Go和Python后，需要判断信息是否充分：\n\
-                [\n\
-                  {\"name\":\"调研Go\",\"tool\":\"rag_search\",\"depends_on\":[],\"task_type\":\"normal\",\"input_template\":\"\"},\n\
-                  {\"name\":\"调研Python\",\"tool\":\"rag_search\",\"depends_on\":[],\"task_type\":\"normal\",\"input_template\":\"\"},\n\
-                  {\"name\":\"判断信息是否充分\",\"task_type\":\"decision\",\"depends_on\":[\"调研Go\",\"调研Python\"],\"routes\":{\"充分\":\"写对比\",\"不充分\":\"补充搜索\"},\"input_template\":\"\"},\n\
-                  {\"name\":\"补充搜索\",\"tool\":\"web_search\",\"depends_on\":[\"判断信息是否充分\"],\"task_type\":\"normal\",\"input_template\":\"\"},\n\
-                  {\"name\":\"写对比\",\"tool\":\"llm_query\",\"depends_on\":[\"判断信息是否充分\"],\"task_type\":\"normal\",\"input_template\":\"\"}\n\
-                ]\n"
+             正确的示例：调研Go和Python后，判断信息是否充分：\n\
+                 [\n\
+                   {\"name\":\"调研Go\",\"tool\":\"rag_search\",\"depends_on\":[],\"task_type\":\"normal\",\"input_template\":\"\"},\n\
+                   {\"name\":\"调研Python\",\"tool\":\"rag_search\",\"depends_on\":[],\"task_type\":\"normal\",\"input_template\":\"\"},\n\
+                   {\"name\":\"判断信息是否充分\",\"task_type\":\"decision\",\"depends_on\":[\"调研Go\",\"调研Python\"],\"routes\":{\"充分\":[],\"不充分\":[\"补充搜索Go\",\"补充搜索Python\"]},\"input_template\":\"\"},\n\
+                   {\"name\":\"补充搜索Go\",\"tool\":\"web_search\",\"depends_on\":[\"判断信息是否充分\"],\"task_type\":\"normal\",\"input_template\":\"\"},\n\
+                   {\"name\":\"补充搜索Python\",\"tool\":\"web_search\",\"depends_on\":[\"判断信息是否充分\"],\"task_type\":\"normal\",\"input_template\":\"\"},\n\
+                   {\"name\":\"写对比\",\"tool\":\"llm_query\",\"depends_on\":[\"判断信息是否充分\",\"补充搜索Go\",\"补充搜索Python\"],\"task_type\":\"normal\",\"input_template\":\"\"}\n\
+                 ]\n\
+             重要：汇总任务不要放在路由里，这样无论如何都会执行。\n\
+             决策为充分时补充搜索被自动跳过，汇总任务依然正常执行。\n\
+             决策为不充分时补充搜索正常执行，汇总等待补充搜索完成后执行。\n"
         } else {
             ""
         };
@@ -316,8 +327,11 @@ impl AgentEngine {
                 format!("\n\n知识库检索到以下相关信息：\n{}", rag_context)
             };
             format!(
-                "第一个子任务必须是「知识库检索」，使用 rag_search 工具。后续子任务基于知识库检索的结果执行。{}\n\
-                 将任务拆解为2-5个子任务并分配工具。\n\
+                "先用 rag_search 从知识库检索相关信息，然后用其他工具执行剩余任务。\n\
+                 rag_search 可以创建 2-3 个，每个覆盖一个主要方面，不要拆太细。\n\
+                 例如对比Go和Python：拆成「搜索Go核心特性」「搜索Python核心特性」「搜索对比数据」3个 rag_search 即可。\n\
+                 后续子任务基于这些检索结果执行。{}\n\
+                 将任务拆解为3-6个子任务并分配工具。\n\
                  {}\
                  要求：\n\
                  1. 把大任务拆成小步骤，每个子任务职责单一\n\
@@ -331,7 +345,7 @@ impl AgentEngine {
             )
         } else {
             format!(
-                "将任务拆解为2-5个子任务并分配工具。\n\
+                "将任务拆解为3-8个子任务并分配工具。\n\
                  {}\
                  要求：\n\
                  1. 把大任务拆成小步骤，每个子任务职责单一\n\
@@ -429,6 +443,7 @@ impl AgentEngine {
         max_concurrency: usize,
         cancel: Option<Arc<AtomicBool>>,
         progress_tx: Option<broadcast::Sender<String>>,
+        verify_hook: Option<Arc<CompositeVerifyHook>>,
     ) -> Result<CompiledGraph<AgentState>, GraphDemoError> {
         let mut graph = StateGraph::<AgentState>::new();
         let semaphore = Arc::new(Semaphore::new(max_concurrency));
@@ -451,6 +466,7 @@ impl AgentEngine {
 
             let cancel = cancel.clone();
             let progress_tx = progress_tx.clone();
+            let verify_hook = verify_hook.clone();
             graph.add_async_node(at.name.clone(), move |state: &AgentState| {
                 let at = at.clone();
                 let config = config.clone();
@@ -462,6 +478,7 @@ impl AgentEngine {
                 let sem = sem.clone();
                 let cancel = cancel.clone();
                 let progress_tx = progress_tx.clone();
+                let verify_hook = verify_hook.clone();
 
                 async move {
                     // 检查是否已取消
@@ -491,13 +508,24 @@ impl AgentEngine {
 
                     let task_start = Instant::now();
 
+                    // 推送任务开始事件
+                    if let Some(ref tx) = progress_tx {
+                        let event = serde_json::json!({
+                            "type": "task_start",
+                            "task": at.name.clone(),
+                            "tool": at.tool.clone(),
+                        }).to_string();
+                        let _ = tx.send(event);
+                    }
+
                     let registry = Arc::new(ToolRegistry::default_registry());
                     let spawn_progress_tx = progress_tx.clone();
+                    let spawn_verify = verify_hook.clone();
 
                     let handle = tokio::spawn(async move {
-                        let (output, tokens) = match at.task_type.as_str() {
+                        let (output, tokens, verify_retries) = match at.task_type.as_str() {
                             "human_review" => {
-                                (format!("⏸️ 待人工审批：{}", at.description), 0)
+                                (format!("⏸️ 待人工审批：{}", at.description), 0, 0u32)
                             }
                             "decision" => {
                                 let decision_llm = OpenAIChat::new(
@@ -514,12 +542,13 @@ impl AgentEngine {
                                 match decision_llm.invoke(vec![Message::human(&p)], None).await {
                                     Ok(r) => {
                                         let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
-                                        (r.content.clone(), t)
+                                        (r.content.clone(), t, 0u32)
                                     }
-                                    Err(_e) => ("判断失败".to_string(), 0),
+                                    Err(_e) => ("判断失败".to_string(), 0, 0u32),
                                 }
                             }
                             _ => {
+                                let mut verify_retries: u32 = 0;
                                 let tool_ctx = ToolContext {
                                     config: config.clone(),
                                     task: task.clone(),
@@ -534,10 +563,43 @@ impl AgentEngine {
                                 let tool_name = if at.tool.is_empty() { "llm_query" } else { &at.tool };
                                 match registry.get(tool_name) {
                                     Some(tool) => {
-                                        match tool.execute(&tool_ctx).await {
-                                            Ok(result) => result,
-                                            Err(e) => (e, 0),
+                                        use crate::services::verify::VerifyResult;
+                                        let mut last_result = tool.execute(&tool_ctx).await;
+
+                                        if let Some(ref hook) = spawn_verify {
+                                            for attempt in 1..=3 {
+                                                match &last_result {
+                                                    Ok((ref out, _)) => {
+                                                        match hook.verify(out, &at).await {
+                                                            VerifyResult::Pass => break,
+                                                            VerifyResult::Fail(reason) => {
+                                                                verify_retries = attempt as u32;
+                                                                if attempt < 3 {
+                                                                    tracing::info!(task_name = %at.name, attempt = attempt, reason = %reason, "验证失败，带反馈重试");
+                                                                    let retry_ctx = ToolContext {
+                                                                        description: format!("{}\n\n---\n【上次验证失败】\n失败原因: {}\n请修正后重新输出。",
+                                                                            at.description, reason),
+                                                                        ..tool_ctx.clone()
+                                                                    };
+                                                                    last_result = tool.execute(&retry_ctx).await;
+                                                                } else {
+                                                                    if let Ok((ref mut out, _)) = last_result {
+                                                                        out.push_str(&format!("\n\n⚠️ 验证不通过(已重试3次): {}", reason));
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(_) => break,
+                                                }
+                                            }
                                         }
+
+                                        let (output, tokens) = match last_result {
+                                            Ok(r) => r,
+                                            Err(e) => (e, 0),
+                                        };
+                                        (output, tokens, verify_retries)
                                     }
                                     None => {
                                         tracing::warn!("工具 {} 不存在，降级为 llm_query", at.tool);
@@ -547,20 +609,21 @@ impl AgentEngine {
                                                     description: format!("(工具:{} 不可用，请直接用 LLM 执行)\n{}", at.tool, at.description),
                                                     ..tool_ctx
                                                 };
-                                                fallback.execute(&fallback_ctx).await.unwrap_or_else(|e| (e, 0))
+                                                let r = fallback.execute(&fallback_ctx).await.unwrap_or_else(|e| (e, 0));
+                                                (r.0, r.1, verify_retries)
                                             }
-                                            None => (format!("工具 {} 不可用且无降级方案", at.tool), 0),
+                                            None => (format!("工具 {} 不可用且无降级方案", at.tool), 0, 0u32),
                                         }
                                     }
                                 }
                             }
                         };
 
-                        (output, tokens)
+                        (output, tokens, verify_retries)
                     });
 
                     match handle.await {
-                        Ok((output, tokens)) => {
+                        Ok((output, tokens, verify_retries)) => {
                             let elapsed = task_start.elapsed().as_millis() as u64;
                             tracing::info!(task_name = %task_name, duration_ms = elapsed, tokens = tokens, "任务完成");
                             // 推送进度事件
@@ -583,6 +646,7 @@ impl AgentEngine {
                                     "duration_ms": elapsed,
                                     "tool": tool_name,
                                     "input_summary": input_template,
+                                    "verify_retries": verify_retries,
                                 }).to_string()
                             ));
                             Ok(StateUpdate::full(new_state))
@@ -643,6 +707,7 @@ impl AgentEngine {
                             duration_ms: parsed["duration_ms"].as_u64().unwrap_or(0),
                             tool: parsed["tool"].as_str().unwrap_or("").to_string(),
                             input_summary: parsed["input_summary"].as_str().unwrap_or("").to_string(),
+                            verify_retries: parsed["verify_retries"].as_u64().unwrap_or(0) as u32,
                         });
                         break;
                     }
@@ -662,6 +727,7 @@ impl AgentEngine {
         vector_store: Option<Arc<QdrantStore>>,
         cancel: Option<Arc<AtomicBool>>,
         progress_tx: Option<broadcast::Sender<String>>,
+        use_verify: bool,
     ) -> Result<Vec<AgentExecResult>, GraphDemoError> {
         let ctx: String = context.iter()
             .map(|r| format!("【{}】\n{}", r.task_name, r.output))
@@ -672,6 +738,11 @@ impl AgentEngine {
             format!("\n\n知识库检索结果：\n{}", rag_context)
         };
         let max_concurrency = config.agent.max_concurrency;
+        let verify_hook = if use_verify {
+            Some(Arc::new(crate::services::verify::create_verify_hook(config)))
+        } else {
+            None
+        };
 
         let compiled = Self::build_batch_graph(
             config.clone(),
@@ -683,6 +754,7 @@ impl AgentEngine {
             max_concurrency,
             cancel,
             progress_tx,
+            verify_hook,
         )?;
 
         let initial = AgentState::new(task.to_string());
@@ -694,7 +766,7 @@ impl AgentEngine {
 
     /// ── 开始执行（返回第一批结果 + session_id） ──
     /// 使用框架 invoke_parallel 并行执行第一批就绪任务
-    pub async fn execute_batch_start(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>, pool: Option<SqlitePool>) -> Result<(String, Vec<AgentExecResult>, bool), GraphDemoError> {
+    pub async fn execute_batch_start(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>, pool: Option<SqlitePool>, use_verify: bool) -> Result<(String, Vec<AgentExecResult>, bool), GraphDemoError> {
         let sid = Uuid::new_v4().to_string();
         let done: HashSet<String> = HashSet::new();
         let batch = Self::ready_batch(&agent_tasks, &done);
@@ -703,7 +775,7 @@ impl AgentEngine {
         let cancel_flag = get_cancel_flag(&sid);
         let (progress_tx, _) = broadcast::channel::<String>(32);
         let progress_tx_clone = progress_tx.clone();
-        let results = Self::run_batch_with_framework(config, &task, &batch, &[], &rag_context, vector_store, Some(cancel_flag.clone()), Some(progress_tx)).await?;
+        let results = Self::run_batch_with_framework(config, &task, &batch, &[], &rag_context, vector_store, Some(cancel_flag.clone()), Some(progress_tx), use_verify).await?;
 
         // 路由逻辑：如果本批有决策节点，跳过未选中的分支
         let mut skipped_names: HashSet<String> = HashSet::new();
@@ -712,11 +784,13 @@ impl AgentEngine {
             if let Some(decided) = Self::parse_decision(&r.output) {
                 if let Some(task_def) = agent_tasks.iter().find(|t| t.name == r.task_name) {
                     let mut matched = false;
-                    for (route_key, next_task) in &task_def.routes {
+                    for (route_key, next_tasks) in &task_def.routes {
                         if route_key == &decided {
                             matched = true;
                         } else {
-                            Self::skip_downstream(&agent_tasks, next_task, &mut skipped_names, &mut skipped_results);
+                            for task_name in next_tasks {
+                                Self::skip_downstream(&agent_tasks, task_name, &mut skipped_names, &mut skipped_results);
+                            }
                         }
                     }
                     if !matched {
@@ -763,6 +837,7 @@ impl AgentEngine {
             task, all, done: done_results.clone(), completed_names, start: Instant::now(), rag_context, review_pending,
             cancel: cancel_flag.clone(),
             progress_tx: Some(progress_tx_clone),
+            use_verify,
         };
         store().lock().unwrap().get_or_insert_with(HashMap::new).insert(sid.clone(), batch_state);
 
@@ -791,14 +866,15 @@ impl AgentEngine {
         let batch = Self::ready_batch(&all, &done_names);
         if batch.is_empty() { return Err(GraphDemoError::BuildError("没有更多可执行任务".into())); }
 
-        let (context, progress_tx) = {
+        let (context, progress_tx, use_verify) = {
             let g = store().lock().unwrap();
             let s = g.as_ref().unwrap().get(sid);
             let ctx = s.map(|s| s.done.clone()).unwrap_or_default();
             let tx = s.and_then(|s| s.progress_tx.clone());
-            (ctx, tx)
+            let verify = s.map(|s| s.use_verify).unwrap_or(false);
+            (ctx, tx, verify)
         };
-        let results = Self::run_batch_with_framework(config, &task, &batch, &context, &rag_context, vector_store, Some(get_cancel_flag(sid)), progress_tx).await?;
+        let results = Self::run_batch_with_framework(config, &task, &batch, &context, &rag_context, vector_store, Some(get_cancel_flag(sid)), progress_tx, use_verify).await?;
 
         let new_review_pending: Vec<AgentTask> = batch.iter()
             .filter(|t| t.task_type == "human_review")
@@ -821,11 +897,13 @@ impl AgentEngine {
                     if let Some(decided) = Self::parse_decision(&r.output) {
                         if let Some(task_def) = all.iter().find(|t| t.name == r.task_name) {
                             let mut matched = false;
-                            for (route_key, next_task) in &task_def.routes {
+                            for (route_key, next_tasks) in &task_def.routes {
                                 if route_key == &decided {
                                     matched = true;
                                 } else {
-                                    Self::skip_downstream(&all, next_task, &mut s.completed_names, &mut s.done);
+                                    for task_name in next_tasks {
+                                        Self::skip_downstream(&all, task_name, &mut s.completed_names, &mut s.done);
+                                    }
                                 }
                             }
                             if !matched {
@@ -863,7 +941,7 @@ impl AgentEngine {
     fn parse_decision(output: &str) -> Option<String> {
         let lower = output.to_lowercase();
         // 按优先级匹配关键词，返回匹配到的原文（与 route key 保持一致）
-        let keywords = ["通过", "充分", "enough", "yes", "不通过", "不充分", "not enough", "no", "tech", "general", "other"];
+        let keywords = ["不充分", "不通过", "not enough", "enough", "充分", "通过", "yes", "no", "tech", "general", "other"];
         for keyword in &keywords {
             if lower.contains(keyword) {
                 return Some(keyword.to_string());
@@ -891,6 +969,7 @@ impl AgentEngine {
             output: "⏭️ 已跳过（决策未选中该路径）".to_string(),
             duration_ms: 0,
             tokens: 0,
+            verify_retries: 0,
         });
         // 递归标记下游
         for task in tasks {
@@ -902,7 +981,7 @@ impl AgentEngine {
 
     /// ── 按依赖分批并行执行：同批任务 invoke_parallel 并行，不同批串行 ──
     /// 例: A → [B, C] → D  => 第一批: A, 第二批: B+C(并行), 第三批: D
-    pub async fn execute_all_batches(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>) -> Result<AgentExecResponse, GraphDemoError> {
+    pub async fn execute_all_batches(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>, use_verify: bool) -> Result<AgentExecResponse, GraphDemoError> {
         let total_start = Instant::now();
 
         let mut done: HashSet<String> = HashSet::new();
@@ -914,7 +993,7 @@ impl AgentEngine {
                 break;
             }
 
-            let results = Self::run_batch_with_framework(config, &task, &batch, &all_results, &rag_context, vector_store.clone(), None, None).await?;
+            let results = Self::run_batch_with_framework(config, &task, &batch, &all_results, &rag_context, vector_store.clone(), None, None, use_verify).await?;
 
             for r in &results {
                 done.insert(r.task_name.clone());
@@ -926,12 +1005,13 @@ impl AgentEngine {
                     if let Some(task_def) = agent_tasks.iter().find(|t| t.name == r.task_name) {
                         let mut matched = false;
                         // 遍历 routes，把非选中的分支对应的后续任务标记为已完成（跳过）
-                        for (route_key, next_task) in &task_def.routes {
+                        for (route_key, next_tasks) in &task_def.routes {
                             if route_key == &decided {
                                 matched = true;
                             } else {
-                                // 找到这个 next_task 及其所有下游任务，标记为跳过
-                                Self::skip_downstream(&agent_tasks, next_task, &mut done, &mut all_results);
+                                for task_name in next_tasks {
+                                    Self::skip_downstream(&agent_tasks, task_name, &mut done, &mut all_results);
+                                }
                             }
                         }
                         if !matched {
@@ -997,6 +1077,7 @@ impl AgentEngine {
                 output: format!("✅ 人工审批通过。反馈：{}", feedback),
                 duration_ms: 0,
                 tokens: 0,
+                verify_retries: 0,
             });
         } else {
             s.done.push(AgentExecResult {
@@ -1006,6 +1087,7 @@ impl AgentEngine {
                 output: format!("❌ 人工审批拒绝。反馈：{}", feedback),
                 duration_ms: 0,
                 tokens: 0,
+                verify_retries: 0,
             });
             s.completed_names.insert(task_name.to_string());
         }
@@ -1119,7 +1201,7 @@ impl AgentEngine {
     /// ── 兼容旧接口（一次性跑完所有批次） ──
     pub async fn plan_and_execute(config: &Config, task: String) -> Result<AgentExecResponse, GraphDemoError> {
         let plan = Self::plan(config, task.clone(), String::new(), false, false).await?;
-        let (sid, mut all, _) = Self::execute_batch_start(config, task, plan.tasks, String::new(), None, None).await?;
+        let (sid, mut all, _) = Self::execute_batch_start(config, task, plan.tasks, String::new(), None, None, false).await?;
         loop {
             let (batch, has_more) = Self::execute_batch_next(config, &sid, None, None).await?;
             all.extend(batch);
@@ -1193,7 +1275,7 @@ mod tests {
         let all = vec![make_task("A", vec![]), make_task("B", vec!["A"])];
         let done = vec![AgentExecResult {
             task_name: "A".into(), tool: String::new(), input_summary: String::new(),
-            output: "ok".into(), duration_ms: 0, tokens: 0,
+            output: "ok".into(), duration_ms: 0, tokens: 0, verify_retries: 0,
         }];
         let completed: HashSet<String> = ["A"].into_iter().map(|s| s.to_string()).collect();
 

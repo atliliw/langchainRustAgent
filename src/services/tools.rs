@@ -23,6 +23,7 @@ use tokio::sync::broadcast;
 use tokio::time::sleep;
 
 /// 工具执行上下文
+#[derive(Clone)]
 pub struct ToolContext {
     pub config: Config,
     pub task: String,
@@ -157,6 +158,10 @@ fn make_llm(config: &Config) -> OpenAIChat {
     OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(2048))
 }
 
+fn make_llm_long(config: &Config) -> OpenAIChat {
+    OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(4096))
+}
+
 fn call_llm<'a>(llm: &'a OpenAIChat, prompt: &'a str) -> impl std::future::Future<Output = Result<(String, usize), String>> + 'a {
     async move {
         let r = llm.invoke(vec![Message::human(prompt)], None)
@@ -188,7 +193,7 @@ impl AgentTool for LlmQueryTool {
             format!("任务：{}\n当前子任务：{}\n\n前置完成的任务结果：\n{}\n\n请基于前置结果执行当前子任务并输出。{}",
                 ctx.task, ctx.description, ctx.ctx, ctx.rag)
         };
-        let llm = make_llm(&ctx.config);
+        let llm = make_llm_long(&ctx.config);
         with_timeout_retry(120, 3, "llm_query", Some(&ctx.cancel), || call_llm(&llm, &prompt)).await
     }
 }
