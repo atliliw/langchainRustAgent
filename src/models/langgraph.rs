@@ -224,3 +224,16 @@ pub struct AgentStepResult {
 pub struct AgentStepRequest {
     pub session_id: String,
 }
+
+#[derive(Deserialize)]
+pub struct InjectRequest {
+    pub session_id: String,
+    pub new_task: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InjectResponse {
+    pub injected_tasks: Vec<AgentTask>,
+    pub graph_structure: serde_json::Value,
+    pub has_more: bool,
+}

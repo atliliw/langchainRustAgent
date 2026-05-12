@@ -185,6 +185,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // 并行执行所有任务
         
         .route("/api/agent/cancel", axum::routing::post(langgraph::agent_cancel))
+        .route("/api/agent/inject", axum::routing::post(langgraph::agent_inject))
         .route("/api/agent/pending", axum::routing::post(langgraph::agent_pending))
         .route("/api/agent/review", axum::routing::post(langgraph::agent_review))
         // 人工审批

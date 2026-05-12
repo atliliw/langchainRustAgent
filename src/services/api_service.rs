@@ -694,4 +694,9 @@ impl ApiService {
             message_count,
         })
     }
+
+    pub async fn agent_inject(&self, sid: &str, new_task: String) -> Result<crate::models::InjectResponse, ApiError> {
+        crate::services::agent_executor::AgentEngine::inject_new_tasks(&self.config, sid, new_task).await
+            .map_err(|e| ApiError::SearchError(e.to_string()))
+    }
 }

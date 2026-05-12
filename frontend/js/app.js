@@ -1822,6 +1822,7 @@ async function agentFetchAndShow(isFirst) {
         resDiv.appendChild(execDiv);
     }
 
+    _agentFetching = true;
     try {
         const url = isFirst ? '/api/agent/execute' : '/api/agent/next';
         const body = isFirst
@@ -1835,6 +1836,7 @@ async function agentFetchAndShow(isFirst) {
         if (isFirst) {
             _agentSessionId = data.session_id;
             connectAgentSSE(data.session_id);
+            showInjectArea(true);
         }
         (data.results || []).forEach(r => _agentAllResults.push(r));
 
@@ -1896,6 +1898,8 @@ async function agentFetchAndShow(isFirst) {
                     + '<button class="btn" onclick="cancelAgentExecution()" style="background:#ef4444;color:white;padding:12px;">✕ 取消</button></div>'
                     : '<span style="color:#10b981;font-weight:bold;">✅ 全部完成</span>')
                 + '</div>';
+            if (data.has_next) showInjectArea(true);
+            else showInjectArea(false);
         }
         html += '</div>';
 
@@ -1932,7 +1936,9 @@ async function agentFetchAndShow(isFirst) {
                 if (data.has_next) {
                     footer.innerHTML = '<div style="display:flex;gap:8px;"><button class="btn" onclick="agentNextBatch()" style="background:#8b5cf6;color:white;flex:1;padding:12px;">▶ 下一步 (' + _agentAllResults.length + '/' + _agentPlanData.tasks.length + ')</button>'
                         + '<button class="btn" onclick="cancelAgentExecution()" style="background:#ef4444;color:white;padding:12px;">✕ 取消</button></div>';
+                    showInjectArea(true);
                 } else {
+                    showInjectArea(false);
                     footer.innerHTML = '<span style="color:#10b981;font-weight:bold;">✅ 全部完成</span>';
                 }
                 const tbl2 = document.querySelector('#agent-results-table');
@@ -1941,6 +1947,124 @@ async function agentFetchAndShow(isFirst) {
         }
     } catch (e) {
         resDiv.innerHTML = '<div style="color:#e94560;padding:20px;">❌ ' + escapeHtml(e.message) + '</div>';
+    } finally {
+        _agentFetching = false;
+        // 批次完成后处理注入队列
+        processInjectQueue();
+    }
+}
+
+// ──── 追加任务（执行中注入新任务）────
+let _agentInjectQueue = [];       // 等待执行的注入队列
+let _agentInjectHistory = [];     // 已注入的历史记录
+let _agentFetching = false;       // 是否正在拉取批次
+
+async function agentInjectTask() {
+    const input = document.getElementById('agent-inject-input');
+    const btn = document.getElementById('agent-inject-btn');
+    const status = document.getElementById('agent-inject-status');
+    if (!input || !_agentSessionId) return;
+    const newTask = input.value.trim();
+    if (!newTask) { showToast('请输入要追加的任务'); return; }
+
+    if (_agentFetching) {
+        // 有节点正在执行，加入等待队列
+        _agentInjectQueue.push(newTask);
+        status.style.display = 'block';
+        status.textContent = '⏳ 等待当前节点完成... (' + _agentInjectQueue.length + ' 个待处理)';
+        input.value = '';
+        showToast('已加入等待队列，当前节点完成后自动规划');
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = '⏳ 规划中...';
+    try {
+        const res = await fetch('/api/agent/inject', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({session_id: _agentSessionId, new_task: newTask})
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '注入失败');
+        // 记录注入历史
+        _agentInjectHistory.push({task: newTask, injected: data.injected_tasks, time: new Date()});
+        // 更新图结构
+        _agentPlanData.graph_structure = data.graph_structure;
+        _agentPlanData.tasks.push(...data.injected_tasks);
+        const annotations = {};
+        _agentAllResults.forEach(r => { annotations[r.task_name] = {label: r.output.substring(0,30), ms: 0}; });
+        document.getElementById('agent-container').innerHTML = renderGraphHtml(data.graph_structure, annotations);
+        // 更新计数的"下一步"按钮文字
+        const nextBtn = document.querySelector('.btn[onclick*="agentNextBatch"]');
+        if (nextBtn) {
+            nextBtn.textContent = '▶ 下一步 (' + _agentAllResults.length + '/' + _agentPlanData.tasks.length + ')';
+        }
+        // 刷新任务列表 + 注入历史
+        refreshInjectTaskList(data.injected_tasks);
+        updateInjectHistory();
+        showToast('✅ 已追加 ' + data.injected_tasks.length + ' 个新任务');
+        input.value = '';
+    } catch (e) {
+        showToast('❌ ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '➕ 追加';
+    }
+}
+
+function refreshInjectTaskList(newTasks) {
+    const detail = document.getElementById('agent-plan-detail');
+    if (!detail || detail.style.display === 'none') return;
+    let table = detail.querySelector('table');
+    if (!table) return;
+    let tbody = table.querySelector('tbody');
+    newTasks.forEach(t => {
+        let row = document.createElement('tr');
+        row.innerHTML = '<td style="padding:8px;border:1px solid #e2e8f0;"><strong>' + escapeHtml(t.name) + '</strong><br><span style="font-size:12px;color:#64748b;">' + escapeHtml(t.description) + '</span></td>'
+            + '<td style="padding:8px;border:1px solid #e2e8f0;"><span style="background:#ede9fe;padding:2px 8px;border-radius:4px;font-size:12px;">' + escapeHtml(t.tool) + '</span></td>'
+            + '<td style="padding:8px;border:1px solid #e2e8f0;font-size:12px;">' + ((t.depends_on||[]).join(', ') || '无') + '</td>'
+            + '<td style="padding:8px;border:1px solid #e2e8f0;font-size:12px;color:#475569;">' + escapeHtml(t.input_template) + '</td></tr>';
+        row.style.backgroundColor = '#f0fdf4';
+        tbody.appendChild(row);
+    });
+}
+
+function showInjectArea(show) {
+    const area = document.getElementById('agent-inject-area');
+    if (area) area.style.display = show ? 'block' : 'none';
+}
+
+function updateInjectHistory() {
+    const container = document.getElementById('agent-inject-history');
+    const count = document.getElementById('agent-inject-count');
+    if (!container) return;
+    if (_agentInjectHistory.length === 0) {
+        container.innerHTML = '';
+        if (count) count.textContent = '';
+        return;
+    }
+    if (count) count.textContent = '已追加 ' + _agentInjectHistory.length + ' 次';
+    container.innerHTML = _agentInjectHistory.map((h, i) =>
+        '<div style="padding:3px 6px;background:#fef3c7;border-radius:4px;margin-bottom:2px;font-size:12px;">'
+        + '<span style="color:#d97706;font-weight:bold;">#' + (i+1) + '</span> '
+        + escapeHtml(h.task)
+        + ' <span style="color:#92400e;">→ ' + h.injected.length + ' 个子任务</span>'
+        + '</div>'
+    ).join('');
+}
+
+// 检查注入队列，处理等待中的注入
+async function processInjectQueue() {
+    if (_agentInjectQueue.length === 0) return;
+    const tasks = [..._agentInjectQueue];
+    _agentInjectQueue = [];
+    const status = document.getElementById('agent-inject-status');
+    if (status) { status.style.display = 'none'; status.textContent = ''; }
+    for (const t of tasks) {
+        // 逐个执行，先等待前一个完成
+        const input = document.getElementById('agent-inject-input');
+        if (input) input.value = t;
+        await agentInjectTask();
     }
 }
 

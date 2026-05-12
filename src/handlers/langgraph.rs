@@ -257,6 +257,18 @@ pub async fn agent_cancel(
     Ok(Json(serde_json::json!({"success": true})))
 }
 
+/// 向正在执行的 session 注入新任务
+/// POST /api/agent/inject
+pub async fn agent_inject(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<serde_json::Value>,
+) -> Result<Json<InjectResponse>, ApiErrorResponse> {
+    let sid = request["session_id"].as_str().unwrap_or("").to_string();
+    let new_task = request["new_task"].as_str().unwrap_or("").to_string();
+    let result = state.api.agent_inject(&sid, new_task).await?;
+    Ok(Json(result))
+}
+
 /// 查询待审核任务
 /// POST /api/agent/pending
 /// 请求: { session_id }

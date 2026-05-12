@@ -1263,6 +1263,147 @@ impl AgentEngine {
         }
         Self::batch_finalize(&sid, None).await
     }
+
+    /// ── 向正在执行的 session 注入新任务 ──
+    /// 获取当前已完成的结果作为 context，调 LLM 规划子任务，
+    /// 合并到 BatchState.all 中，后续 execute_batch_next 会自然拾取。
+    pub async fn inject_new_tasks(
+        config: &Config,
+        sid: &str,
+        new_task: String,
+    ) -> Result<crate::models::InjectResponse, GraphDemoError> {
+        // 1. 获取当前 session 状态
+        let (original_task, all, done, completed_names, has_review) = {
+            let g = store().lock().unwrap();
+            let m = g.as_ref().ok_or_else(|| GraphDemoError::BuildError("没有正在执行的 session".into()))?;
+            let s = m.get(sid).ok_or_else(|| GraphDemoError::BuildError("session 不存在".into()))?;
+            (
+                s.task.clone(),
+                s.all.clone(),
+                s.done.clone(),
+                s.completed_names.clone(),
+                !s.review_pending.is_empty(),
+            )
+        };
+
+        if has_review {
+            return Err(GraphDemoError::BuildError("有待审批的人工审核任务，请先审批".into()));
+        }
+
+        // 2. 构建 context（已完成任务摘要）
+        let done_summary: String = done.iter()
+            .map(|r| format!("【{}】\n{}", r.task_name, r.output.chars().take(200).collect::<String>()))
+            .collect::<Vec<_>>().join("\n\n");
+        let pending_names: Vec<String> = all.iter()
+            .filter(|t| !completed_names.contains(&t.name))
+            .map(|t| t.name.clone())
+            .collect();
+
+        // 3. 调 LLM 规划新任务的子任务
+        let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
+        let registry = crate::services::tools::ToolRegistry::default_registry();
+        let tj = registry.list_descriptions().iter()
+            .map(|(n,d)| format!("{{\"name\":\"{}\",\"description\":\"{}\"}}", n, d))
+            .collect::<Vec<_>>().join(",");
+
+        let prompt = format!(
+            r#"你正在执行一个多步骤任务。用户在执行过程中提出了新需求。
+
+原始任务：{original}
+
+已完成的任务及结果：
+{done_summary}
+
+还未执行的任务：{pending}
+
+新增需求：{new_task}
+
+要求：
+- 基于已完成的结果和新增需求，规划子任务来满足新需求
+- 已完成的任务不要重复
+- 可以用 depends_on 引用已有任务（包括已完成的和未完成的）
+- 如果新任务需要已有结果，depends_on 设为对应已完成任务名
+- depends_on 为空的子任务会立即执行
+- 每个子任务分配一个工具
+- 可用工具：[{tools}]
+- 返回 JSON 数组，只返回 JSON
+
+返回格式：
+[{{"name":"子任务名","description":"做什么","tool":"工具名","depends_on":["前置任务名"],"task_type":"normal","input_template":"需要什么"}}]
+"#,
+            original = original_task,
+            done_summary = done_summary,
+            pending = pending_names.join(", "),
+            new_task = new_task,
+            tools = tj,
+        );
+
+        let r = llm.invoke(vec![Message::human(&prompt)], None).await
+            .map_err(|e| GraphDemoError::ExecutionError(format!("LLM 失败: {}", e)))?;
+        let cleaned = r.content
+            .trim_start_matches("```json").trim_start_matches("```")
+            .trim_end_matches("```").trim();
+
+        let mut new_tasks: Vec<AgentTask> = serde_json::from_str(cleaned)
+            .map_err(|e| GraphDemoError::BuildError(format!(
+                "LLM 返回格式错误: {} — 原始内容: {}",
+                e, &cleaned.chars().take(300).collect::<String>()
+            )))?;
+
+        if new_tasks.is_empty() {
+            return Err(GraphDemoError::BuildError("LLM 未返回子任务".into()));
+        }
+
+        // 4. 合并到 session 中
+        let mut all_names: std::collections::HashSet<String> =
+            all.iter().map(|t| t.name.clone()).collect();
+
+        // 去重：跳过名称已存在的任务
+        new_tasks.retain(|t| !all_names.contains(&t.name));
+        for t in &new_tasks {
+            all_names.insert(t.name.clone());
+        }
+
+        // 5. 已完成的依赖自动满足
+        let new_completed = completed_names.clone();
+
+        // 6. 新任务若 `depends_on` 为空，设为最后一个已完成任务，确保图渲染在正确层级
+        //    不影响执行：该依赖已在 completed_names 中，ready_batch 会认为已满足
+        let last_done_name = {
+            let mut dn: Vec<String> = done.iter().map(|r| r.task_name.clone()).collect();
+            dn.sort();
+            dn.dedup();
+            dn.last().cloned()
+        };
+        for t in &mut new_tasks {
+            if t.depends_on.is_empty() {
+                if let Some(ref last) = last_done_name {
+                    t.depends_on.push(last.clone());
+                }
+            }
+        }
+
+        // 7. 构建图结构
+        let graph_structure = Self::build_graph_with_subgraph(
+            &[all.as_slice(), new_tasks.as_slice()].concat(),
+            false,
+        );
+
+        let has_more = {
+            let mut g = store().lock().unwrap();
+            let m = g.as_mut().ok_or_else(|| GraphDemoError::BuildError("session 已结束".into()))?;
+            let s = m.get_mut(sid).ok_or_else(|| GraphDemoError::BuildError("session 不存在".into()))?;
+            s.all.extend(new_tasks.clone());
+            s.completed_names = new_completed;
+            s.review_pending.is_empty() && s.completed_names.len() < s.all.len()
+        };
+
+        Ok(crate::models::InjectResponse {
+            injected_tasks: new_tasks,
+            graph_structure,
+            has_more,
+        })
+    }
 }
 
 #[cfg(test)]
