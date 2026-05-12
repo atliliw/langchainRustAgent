@@ -1372,6 +1372,8 @@ function renderGraphHtml(structure, annotations) {
     const nodes = structure.nodes || [];
     const edges = structure.edges || [];
     const entry = structure.entry_point || '';
+    const isSubgraph = structure.subgraph === true;
+    const subgraphNodes = structure.subgraph_nodes || {};  // { taskName: [{name,tool},...] }
     const nodeColors = {};
     nodes.forEach(n => {
         if (n === entry) nodeColors[n] = '#10b981';
@@ -1381,9 +1383,74 @@ function renderGraphHtml(structure, annotations) {
     let html = '<div style="display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px;">';
     html += renderGraphNode('START', '#10b981', 'START', null);
     html += renderArrow();
-    html += renderFlowLevel(nodes, edges, entry, nodeColors, annotations);
+    html += renderFlowLevelWithSubgraphs(nodes, edges, entry, nodeColors, annotations, subgraphNodes);
     html += renderArrow();
     html += renderGraphNode('END', '#ef4444', 'END', null);
+    html += '</div>';
+    return html;
+}
+
+function renderFlowLevelWithSubgraphs(nodes, edges, entry, nodeColors, annotations, subgraphNodes) {
+    const depMap = {};
+    nodes.forEach(n => {
+        const deps = edges.filter(e =>
+            e.type === 'fixed' && e.target === n && e.source !== '__start__' && e.target !== '__end__'
+        ).map(e => e.source);
+        const taskDef = _agentPlanData && _agentPlanData.tasks ? _agentPlanData.tasks.find(t => t.name === n) : null;
+        const realDeps = taskDef ? (taskDef.depends_on || []) : deps;
+        if (!realDeps || realDeps.length === 0) {
+            depMap[n] = 0;
+        } else {
+            depMap[n] = 1 + Math.max(0, ...realDeps.map(d => (depMap[d] !== undefined ? depMap[d] : 0)));
+        }
+    });
+    const maxLevel = Math.max(0, ...Object.values(depMap));
+    const levels = [];
+    for (let i = 0; i <= maxLevel; i++) {
+        levels.push(Object.keys(depMap).filter(k => depMap[k] === i));
+    }
+
+    let html = '';
+    levels.forEach((level, li) => {
+        if (li > 0) html += renderArrow();
+        if (level.length === 1) {
+            const name = level[0];
+            if (subgraphNodes[name]) {
+                html += renderSubgraphNode(name, subgraphNodes[name], nodeColors[name] || '#3b82f6', annotations[name] || null);
+            } else {
+                html += renderGraphNode(name, nodeColors[name] || '#3b82f6', name, annotations[name] || null);
+            }
+        } else {
+            html += '<div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;">';
+            level.forEach(name => {
+                if (subgraphNodes[name]) {
+                    html += renderSubgraphNode(name, subgraphNodes[name], nodeColors[name] || '#3b82f6', annotations[name] || null);
+                } else {
+                    html += renderGraphNode(name, nodeColors[name] || '#3b82f6', name, annotations[name] || null);
+                }
+            });
+            html += '</div>';
+        }
+    });
+    return html;
+}
+
+function renderSubgraphNode(name, internalNodes, color, annotation) {
+    let html = '<div style="border:2px dashed #059669;border-radius:10px;padding:8px;background:#f0fdf4;display:inline-block;text-align:center;min-width:160px;">';
+    html += '<div style="font-size:10px;font-weight:bold;color:#059669;margin-bottom:4px;">📦 子图</div>';
+    html += '<div style="font-size:13px;font-weight:bold;color:' + color + ';padding:4px 8px;">' + escapeHtml(name) + '</div>';
+    // 内部节点
+    html += '<div style="display:flex;flex-direction:column;align-items:center;gap:2px;margin-top:4px;padding:4px;background:white;border-radius:6px;">';
+    internalNodes.forEach((n, i) => {
+        if (i > 0) {
+            html += '<div style="font-size:10px;color:#94a3b8;">↓</div>';
+        }
+        html += '<div style="font-size:11px;background:#e0f2fe;padding:2px 8px;border-radius:4px;color:#0369a1;">' + escapeHtml(n.name) + '</div>';
+    });
+    html += '</div>';
+    if (annotation) {
+        html += '<div style="font-size:10px;color:#64748b;margin-top:4px;">' + escapeHtml(annotation.label || '') + '</div>';
+    }
     html += '</div>';
     return html;
 }

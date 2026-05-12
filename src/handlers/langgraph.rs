@@ -151,7 +151,8 @@ pub async fn agent_plan(
     let task = request["task"].as_str().unwrap_or("").to_string();
     let use_rag = request["use_rag"].as_bool().unwrap_or(false);
     let use_routing = request["use_routing"].as_bool().unwrap_or(false);
-    let result = state.api.agent_plan(task, use_rag, use_routing).await?;
+    let use_subgraph = request["use_subgraph"].as_bool().unwrap_or(false);
+    let result = state.api.agent_plan(task, use_rag, use_routing, use_subgraph).await?;
     Ok(Json(result))
 }
 

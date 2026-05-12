@@ -546,13 +546,13 @@ impl ApiService {
     
     /// ──────────────────── 真实 Agent 系统 ────────────────────
     
-    pub async fn agent_plan(&self, task: String, use_rag: bool, use_routing: bool) -> Result<AgentPlan, ApiError> {
+    pub async fn agent_plan(&self, task: String, use_rag: bool, use_routing: bool, use_subgraph: bool) -> Result<AgentPlan, ApiError> {
         let rag_context = if use_rag {
             self.search_knowledge_base(&task, 5).await
         } else {
             String::new()
         };
-        crate::services::agent_executor::AgentEngine::plan(&self.config, task, rag_context, use_rag, use_routing).await
+        crate::services::agent_executor::AgentEngine::plan(&self.config, task, rag_context, use_rag, use_routing, use_subgraph).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
     

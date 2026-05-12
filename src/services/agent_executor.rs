@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::config::Config;
 use crate::errors::GraphDemoError;
 use crate::models::*;
@@ -6,11 +8,12 @@ use crate::services::verify::{CompositeVerifyHook, VerifyHook};
 use crate::stores::QdrantStore;
 use langchainrust::langgraph::{
     AgentState, CompiledGraph, MessageEntry, ParallelInvocation,
-    StateGraph, StateUpdate, START, END,
+    StateGraph, StateSchema, StateUpdate, START, END,
 };
 use langchainrust::{language_models::OpenAIChat, schema::Message, core::runnables::Runnable};
 use sqlx::SqlitePool;
 use std::collections::{HashSet, HashMap};
+use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -282,6 +285,15 @@ fn fix_json(input: &str) -> String {
     fixed
 }
 
+// ── 子图状态类型（独立于父图 AgentState） ──
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchExtractState {
+    pub query: String,
+    pub search_raw: String,
+    pub extracted: String,
+}
+impl StateSchema for SearchExtractState {}
+
 pub struct AgentEngine;
 
 impl AgentEngine {
@@ -291,7 +303,7 @@ impl AgentEngine {
     }
 
     /// ── 规划 ──
-    pub async fn plan(config: &Config, task: String, rag_context: String, use_rag: bool, use_routing: bool) -> Result<AgentPlan, GraphDemoError> {
+    pub async fn plan(config: &Config, task: String, rag_context: String, use_rag: bool, use_routing: bool, use_subgraph: bool) -> Result<AgentPlan, GraphDemoError> {
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
         let registry = ToolRegistry::default_registry();
         let tj = registry.list_descriptions().iter()
@@ -313,11 +325,11 @@ impl AgentEngine {
                    {\"name\":\"判断信息是否充分\",\"task_type\":\"decision\",\"depends_on\":[\"调研Go\",\"调研Python\"],\"routes\":{\"充分\":[],\"不充分\":[\"补充搜索Go\",\"补充搜索Python\"]},\"input_template\":\"\"},\n\
                    {\"name\":\"补充搜索Go\",\"tool\":\"web_search\",\"depends_on\":[\"判断信息是否充分\"],\"task_type\":\"normal\",\"input_template\":\"\"},\n\
                    {\"name\":\"补充搜索Python\",\"tool\":\"web_search\",\"depends_on\":[\"判断信息是否充分\"],\"task_type\":\"normal\",\"input_template\":\"\"},\n\
-                   {\"name\":\"写对比\",\"tool\":\"llm_query\",\"depends_on\":[\"判断信息是否充分\",\"补充搜索Go\",\"补充搜索Python\"],\"task_type\":\"normal\",\"input_template\":\"\"}\n\
-                 ]\n\
-             重要：汇总任务不要放在路由里，这样无论如何都会执行。\n\
-             决策为充分时补充搜索被自动跳过，汇总任务依然正常执行。\n\
-             决策为不充分时补充搜索正常执行，汇总等待补充搜索完成后执行。\n"
+                    {\"name\":\"写对比\",\"tool\":\"llm_query\",\"depends_on\":[\"判断信息是否充分\"],\"task_type\":\"normal\",\"input_template\":\"\"}\n\
+                  ]\n\
+              重要：汇总任务不要放在路由里，这样无论如何都会执行。\n\
+              汇总任务的 depends_on 只应依赖决策节点和初始搜索任务，不要依赖条件分支里的任务。\n\
+              因为条件分支的任务可能被跳过，导致汇总任务也被级联跳过。\n"
         } else {
             ""
         };
@@ -392,11 +404,15 @@ impl AgentEngine {
         };
 
         if tasks.is_empty() { return Err(GraphDemoError::BuildError("规划为空".into())); }
-        let gs = Self::build_graph(&tasks);
+        let gs = Self::build_graph_with_subgraph(&tasks, use_subgraph);
         Ok(AgentPlan{original_task:task, tasks, graph_structure:gs})
     }
 
     fn build_graph(tasks: &[AgentTask]) -> serde_json::Value {
+        Self::build_graph_with_subgraph(tasks, false)
+    }
+
+    fn build_graph_with_subgraph(tasks: &[AgentTask], use_subgraph: bool) -> serde_json::Value {
         let names: HashSet<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
         let nodes: Vec<String> = tasks.iter().map(|t| t.name.clone()).collect();
         let mut edges = vec![];
@@ -417,7 +433,29 @@ impl AgentEngine {
             }
             edges.push(serde_json::json!({"type":"fixed","source":task.name,"target":"__end__"}));
         }
-        serde_json::json!({"entry_point":tasks[0].name,"nodes":nodes,"edges":edges,"routers":[]})
+
+        if use_subgraph {
+            // 标记哪些节点是子图（rag_search 任务 → 搜索+提取子图）
+            let mut subgraph_nodes = serde_json::Map::new();
+            for t in tasks {
+                if t.tool == "rag_search" {
+                    subgraph_nodes.insert(t.name.clone(), serde_json::json!([
+                        {"name":"知识库检索","tool":"rag_search"},
+                        {"name":"提取关键信息","tool":"llm_query"}
+                    ]));
+                }
+            }
+            serde_json::json!({
+                "entry_point": tasks[0].name,
+                "nodes": nodes,
+                "edges": edges,
+                "routers": [],
+                "subgraph": true,
+                "subgraph_nodes": subgraph_nodes,
+            })
+        } else {
+            serde_json::json!({"entry_point": tasks[0].name, "nodes": nodes, "edges": edges, "routers": []})
+        }
     }
 
     // ── 找出当前批就绪任务（所有依赖已满足的） ──
@@ -431,10 +469,67 @@ impl AgentEngine {
         }).cloned().collect()
     }
 
-    // ──────────────────────── 框架集成 ────────────────────────
+    // ──────────────────────── 子图系统 ────────────────────────
+    //
+    // 搜索→提取子图：独立状态类型，可复用，可独立测试
+    // 定义一次，通过 add_subgraph + mapper 嵌入任意父图
 
-    /// 用框架构建单层图：dispatch → FanOut(batch) → FanIn → END
-    /// vector_store 不为空时，rag_search 工具会用任务名独立搜索（不再共享 rag 参数）
+    /// 构建搜索→提取子图（定义一次，可独立测试）
+    fn build_search_extract_subgraph_template(
+        config: &Config,
+        vector_store: Option<Arc<QdrantStore>>,
+    ) -> Result<CompiledGraph<SearchExtractState>, GraphDemoError> {
+        let config = config.clone();
+        let config2 = config.clone();
+        let vector_store = vector_store.clone();
+        let mut sub = StateGraph::<SearchExtractState>::new();
+
+        sub.add_async_node("检索", move |state: &SearchExtractState| {
+            let config = config.clone();
+            let vector_store = vector_store.clone();
+            let state = state.clone();
+            async move {
+                let query = &state.query;
+                let search_result = match &vector_store {
+                    Some(store) => match tokio::time::timeout(Duration::from_secs(30), store.search_rag(query, 3)).await {
+                        Ok(Ok(results)) => {
+                            let filtered: Vec<_> = results.iter().filter(|r| r.score >= 0.3).collect();
+                            if filtered.is_empty() { format!("知识库中未找到相关文档（搜索词：{}）", query) }
+                            else {
+                                let content: Vec<String> = filtered.iter().map(|r| format!("[相关性 {:.1}%]\n{}", r.score * 100.0, r.document.content)).collect();
+                                format!("检索结果（{}）：\n\n{}", query, content.join("\n\n---\n\n"))
+                            }
+                        }
+                        _ => format!("搜索失败（{}）", query),
+                    },
+                    None => "知识库未配置".to_string(),
+                };
+                let mut ns = state;
+                ns.search_raw = search_result;
+                Ok(StateUpdate::full(ns))
+            }
+        });
+        sub.add_async_node("提取", move |state: &SearchExtractState| {
+            let config = config2.clone();
+            let state = state.clone();
+            async move {
+                let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(2048));
+                let prompt = format!("从以下检索结果中提取关键信息并总结。\n\n检索结果：\n{}\n\n请提取关键信息：", state.search_raw);
+                let (output, _tokens) = match llm.invoke(vec![Message::human(&prompt)], None).await {
+                    Ok(r) => (r.content.clone(), r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0)),
+                    Err(e) => (format!("提取失败: {}", e), 0),
+                };
+                let mut ns = state;
+                ns.extracted = output;
+                Ok(StateUpdate::full(ns))
+            }
+        });
+        sub.add_edge(START, "检索");
+        sub.add_edge("检索", "提取");
+        sub.add_edge("提取", END);
+        sub.compile().map_err(|e| GraphDemoError::BuildError(e.to_string()))
+    }
+
     fn build_batch_graph(
         config: Config,
         task: String,
@@ -457,7 +552,7 @@ impl AgentEngine {
             Ok(StateUpdate::full(state.clone()))
         });
 
-        // 每个任务一个 AsyncNode
+        // 每个任务一个节点（rag_search 且子图模式 → 搜索+提取子图）
         for at in &batch {
             let at = at.clone();
             let config = config.clone();
@@ -466,10 +561,32 @@ impl AgentEngine {
             let rag = rag.clone();
             let vector_store = vector_store.clone();
             let sem = semaphore.clone();
-
             let cancel = cancel.clone();
             let progress_tx = progress_tx.clone();
             let verify_hook = verify_hook.clone();
+
+            // 子图模式：每个 rag_search 任务使用搜索→提取子图（独立状态类型）
+            if use_subgraph && at.tool == "rag_search" {
+                let task_name = at.name.clone();
+                let query = if at.input_template.is_empty() { at.name.clone() } else { at.input_template.clone() };
+                let sub = Self::build_search_extract_subgraph_template(&config, vector_store.clone())?;
+                graph.add_subgraph(
+                    at.name.clone(), sub,
+                    move |_: &AgentState| -> SearchExtractState {
+                        SearchExtractState { query: query.clone(), search_raw: String::new(), extracted: String::new() }
+                    },
+                    move |sub_state: &SearchExtractState, parent: &mut AgentState| {
+                        let msg = serde_json::json!({
+                            "task": task_name, "output": sub_state.extracted,
+                            "tokens": 0, "duration_ms": 0, "tool": "rag_search",
+                            "input_summary": "", "verify_retries": 0,
+                        }).to_string();
+                        parent.add_message(MessageEntry::ai(msg));
+                    },
+                );
+                continue;
+            }
+
             graph.add_async_node(at.name.clone(), move |state: &AgentState| {
                 let at = at.clone();
                 let config = config.clone();
@@ -484,22 +601,14 @@ impl AgentEngine {
                 let verify_hook = verify_hook.clone();
 
                 async move {
-                    // 检查是否已取消
                     if cancel.load(Ordering::Relaxed) {
                         tracing::info!(task_name = %at.name, "任务已取消，跳过执行");
                         return Ok(StateUpdate::full(state));
                     }
-
-                    // 获取并发许可
                     let _permit = match sem.acquire().await {
                         Ok(p) => p,
-                        Err(_) => {
-                            tracing::warn!(task_name = %at.name, "并发许可获取失败");
-                            return Ok(StateUpdate::full(state));
-                        }
+                        Err(_) => { tracing::warn!(task_name = %at.name, "并发许可获取失败"); return Ok(StateUpdate::full(state)); }
                     };
-
-                    // 再次检查取消（等待许可期间可能被取消）
                     if cancel.load(Ordering::Relaxed) {
                         tracing::info!(task_name = %at.name, "任务在等待许可时被取消");
                         return Ok(StateUpdate::full(state));
@@ -508,111 +617,64 @@ impl AgentEngine {
                     let tool_name = at.tool.clone();
                     let input_template = at.input_template.clone();
                     tracing::info!(task_name = %task_name, tool = %tool_name, "任务开始执行");
-
                     let task_start = Instant::now();
-
-                    // 推送任务开始事件
                     if let Some(ref tx) = progress_tx {
-                        let event = serde_json::json!({
-                            "type": "task_start",
-                            "task": at.name.clone(),
-                            "tool": at.tool.clone(),
-                        }).to_string();
-                        let _ = tx.send(event);
+                        let _ = tx.send(serde_json::json!({"type":"task_start","task":at.name,"tool":at.tool}).to_string());
                     }
-
                     let registry = Arc::new(ToolRegistry::default_registry());
                     let spawn_progress_tx = progress_tx.clone();
                     let spawn_verify = verify_hook.clone();
-
                     let handle = tokio::spawn(async move {
                         let (output, tokens, verify_retries) = match at.task_type.as_str() {
-                            "human_review" => {
-                                (format!("⏸️ 待人工审批：{}", at.description), 0, 0u32)
-                            }
+                            "human_review" => (format!("⏸️ 待人工审批：{}", at.description), 0, 0u32),
                             "decision" => {
-                                let decision_llm = OpenAIChat::new(
-                                    config.to_langchain_openai_config().with_max_tokens(1024)
-                                );
-                                let ctx_str = if ctx.is_empty() { "无前置结果".to_string() } else {
-                                    format!("前置完成的任务结果：\n{}", ctx)
-                                };
-                                let route_options: Vec<String> = at.routes.keys().map(|k| format!("「{}」", k)).collect();
-                                let p = format!(
-                                    "基于以下信息做出判断，只返回决策结果（{}），不要多余内容。\n\n{}\n\n当前决策：{}",
-                                    route_options.join(" 或 "), ctx_str, at.description
-                                );
+                                let decision_llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
+                                let ctx_str = if ctx.is_empty() { "无前置结果".to_string() } else { format!("前置完成的任务结果：\n{}", ctx) };
+                                let r_opts: Vec<String> = at.routes.keys().map(|k| format!("「{}」", k)).collect();
+                                let p = format!("基于以下信息做出判断，只返回决策结果（{}），不要多余内容。\n\n{}\n\n当前决策：{}", r_opts.join(" 或 "), ctx_str, at.description);
                                 match decision_llm.invoke(vec![Message::human(&p)], None).await {
-                                    Ok(r) => {
-                                        let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
-                                        (r.content.clone(), t, 0u32)
-                                    }
+                                    Ok(r) => { let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0); (r.content.clone(), t, 0u32) }
                                     Err(_e) => ("判断失败".to_string(), 0, 0u32),
                                 }
                             }
                             _ => {
                                 let mut verify_retries: u32 = 0;
                                 let tool_ctx = ToolContext {
-                                    config: config.clone(),
-                                    task: task.clone(),
-                                    description: at.description.clone(),
-                                    ctx: ctx.clone(),
-                                    rag: rag.clone(),
-                                    input_template: at.input_template.clone(),
-                                    vector_store: vector_store.clone(),
-                                    cancel: cancel.clone(),
-                                    progress: spawn_progress_tx.clone(),
+                                    config: config.clone(), task: task.clone(), description: at.description.clone(),
+                                    ctx: ctx.clone(), rag: rag.clone(), input_template: at.input_template.clone(),
+                                    vector_store: vector_store.clone(), cancel: cancel.clone(), progress: spawn_progress_tx.clone(),
                                 };
-                                let tool_name = if at.tool.is_empty() { "llm_query" } else { &at.tool };
-                                match registry.get(tool_name) {
+                                let t_name = if at.tool.is_empty() { "llm_query" } else { &at.tool };
+                                match registry.get(t_name) {
                                     Some(tool) => {
                                         use crate::services::verify::VerifyResult;
                                         let mut last_result = tool.execute(&tool_ctx).await;
-
                                         if let Some(ref hook) = spawn_verify {
                                             for attempt in 1..=3 {
                                                 match &last_result {
-                                                    Ok((ref out, _)) => {
-                                                        match hook.verify(out, &at).await {
-                                                            VerifyResult::Pass => break,
-                                                            VerifyResult::Fail(reason) => {
-                                                                verify_retries = attempt as u32;
-                                                                if attempt < 3 {
-                                                                    tracing::info!(task_name = %at.name, attempt = attempt, reason = %reason, "验证失败，带反馈重试");
-                                                                    let retry_ctx = ToolContext {
-                                                                        description: format!("{}\n\n---\n【上次验证失败】\n失败原因: {}\n请修正后重新输出。",
-                                                                            at.description, reason),
-                                                                        ..tool_ctx.clone()
-                                                                    };
-                                                                    last_result = tool.execute(&retry_ctx).await;
-                                                                } else {
-                                                                    if let Ok((ref mut out, _)) = last_result {
-                                                                        out.push_str(&format!("\n\n⚠️ 验证不通过(已重试3次): {}", reason));
-                                                                    }
-                                                                }
-                                                            }
+                                                    Ok((ref out, _)) => match hook.verify(out, &at).await {
+                                                        VerifyResult::Pass => break,
+                                                        VerifyResult::Fail(reason) => {
+                                                            verify_retries = attempt as u32;
+                                                            if attempt < 3 {
+                                                                let retry_ctx = ToolContext { description: format!("{}\n\n---\n【上次验证失败】\n失败原因: {}\n请修正后重新输出。", at.description, reason), ..tool_ctx.clone() };
+                                                                last_result = tool.execute(&retry_ctx).await;
+                                                            } else { if let Ok((ref mut out, _)) = last_result { out.push_str(&format!("\n\n⚠️ 验证不通过(已重试3次): {}", reason)); } }
                                                         }
-                                                    }
+                                                    },
                                                     Err(_) => break,
                                                 }
                                             }
                                         }
-
-                                        let (output, tokens) = match last_result {
-                                            Ok(r) => r,
-                                            Err(e) => (e, 0),
-                                        };
-                                        (output, tokens, verify_retries)
+                                        let (out, tok) = match last_result { Ok(r) => r, Err(e) => (e, 0) };
+                                        (out, tok, verify_retries)
                                     }
                                     None => {
                                         tracing::warn!("工具 {} 不存在，降级为 llm_query", at.tool);
                                         match registry.get("llm_query") {
                                             Some(fallback) => {
-                                                let fallback_ctx = ToolContext {
-                                                    description: format!("(工具:{} 不可用，请直接用 LLM 执行)\n{}", at.tool, at.description),
-                                                    ..tool_ctx
-                                                };
-                                                let r = fallback.execute(&fallback_ctx).await.unwrap_or_else(|e| (e, 0));
+                                                let fb_ctx = ToolContext { description: format!("(工具:{} 不可用，请直接用 LLM 执行)\n{}", at.tool, at.description), ..tool_ctx };
+                                                let r = fallback.execute(&fb_ctx).await.unwrap_or_else(|e| (e, 0));
                                                 (r.0, r.1, verify_retries)
                                             }
                                             None => (format!("工具 {} 不可用且无降级方案", at.tool), 0, 0u32),
@@ -621,63 +683,28 @@ impl AgentEngine {
                                 }
                             }
                         };
-
                         (output, tokens, verify_retries)
                     });
-
                     match handle.await {
                         Ok((output, tokens, verify_retries)) => {
                             let elapsed = task_start.elapsed().as_millis() as u64;
                             tracing::info!(task_name = %task_name, duration_ms = elapsed, tokens = tokens, "任务完成");
-                            // 推送进度事件
                             if let Some(ref tx) = progress_tx {
-                                let event = serde_json::json!({
-                                    "type": "task_complete",
-                                    "task": task_name,
-                                    "tool": tool_name,
-                                    "duration_ms": elapsed,
-                                    "tokens": tokens,
-                                }).to_string();
-                                let _ = tx.send(event);
+                                let _ = tx.send(serde_json::json!({"type":"task_complete","task":task_name,"tool":tool_name,"duration_ms":elapsed,"tokens":tokens}).to_string());
                             }
-                            let mut new_state = state;
-                            new_state.add_message(MessageEntry::ai(
-                                serde_json::json!({
-                                    "task": task_name,
-                                    "output": output,
-                                    "tokens": tokens,
-                                    "duration_ms": elapsed,
-                                    "tool": tool_name,
-                                    "input_summary": input_template,
-                                    "verify_retries": verify_retries,
-                                }).to_string()
-                            ));
-                            Ok(StateUpdate::full(new_state))
+                            let mut ns = state;
+                            ns.add_message(MessageEntry::ai(serde_json::json!({"task":task_name,"output":output,"tokens":tokens,"duration_ms":elapsed,"tool":tool_name,"input_summary":input_template,"verify_retries":verify_retries}).to_string()));
+                            Ok(StateUpdate::full(ns))
                         }
                         Err(e) => {
                             let elapsed = task_start.elapsed().as_millis() as u64;
                             tracing::warn!(task_name = %task_name, error = %e, "任务执行失败");
-                            // 推送失败事件
                             if let Some(ref tx) = progress_tx {
-                                let event = serde_json::json!({
-                                    "type": "task_error",
-                                    "task": task_name,
-                                    "error": e.to_string(),
-                                }).to_string();
-                                let _ = tx.send(event);
+                                let _ = tx.send(serde_json::json!({"type":"task_error","task":task_name,"error":e.to_string()}).to_string());
                             }
-                            let mut new_state = state;
-                            new_state.add_message(MessageEntry::ai(
-                                serde_json::json!({
-                                    "task": task_name,
-                                    "output": format!("任务 panic: {}", e),
-                                    "tokens": 0,
-                                    "duration_ms": elapsed,
-                                    "tool": tool_name,
-                                    "input_summary": input_template,
-                                }).to_string()
-                            ));
-                            Ok(StateUpdate::full(new_state))
+                            let mut ns = state;
+                            ns.add_message(MessageEntry::ai(serde_json::json!({"task":task_name,"output":format!("任务 panic: {}",e),"tokens":0,"duration_ms":elapsed,"tool":tool_name,"input_summary":input_template}).to_string()));
+                            Ok(StateUpdate::full(ns))
                         }
                     }
                 }
@@ -692,18 +719,7 @@ impl AgentEngine {
             graph.add_edge(name.clone(), END);
         }
 
-        let flat_graph = graph.compile().map_err(|e| GraphDemoError::BuildError(e.to_string()))?;
-
-        if use_subgraph {
-            // 子图模式：把整个任务图作为子图，嵌入父图
-            let mut parent = StateGraph::<AgentState>::new();
-            parent.add_subgraph_same_state("agent_tasks", flat_graph);
-            parent.add_edge(START, "agent_tasks");
-            parent.add_edge("agent_tasks", END);
-            parent.compile().map_err(|e| GraphDemoError::BuildError(e.to_string()))
-        } else {
-            Ok(flat_graph)
-        }
+        graph.compile().map_err(|e| GraphDemoError::BuildError(e.to_string()))
     }
 
     /// 从 invoke_parallel 的结果中提取每个任务的输出
@@ -731,7 +747,27 @@ impl AgentEngine {
         results
     }
 
+    /// 计算任务的依赖层级
+    fn calculate_levels(tasks: &[AgentTask]) -> Vec<Vec<AgentTask>> {
+        let names: std::collections::HashSet<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
+        let mut levels: Vec<Vec<AgentTask>> = Vec::new();
+        let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        loop {
+            let ready: Vec<AgentTask> = tasks.iter()
+                .filter(|t| !assigned.contains(&t.name))
+                .filter(|t| t.depends_on.iter().filter(|d| names.contains(d.as_str())).all(|d| assigned.contains(d)))
+                .cloned()
+                .collect();
+            if ready.is_empty() { break; }
+            for t in &ready { assigned.insert(t.name.clone()); }
+            levels.push(ready);
+        }
+        levels
+    }
+
     /// 用框架执行一批任务（构建图 + invoke_parallel）
+    /// 当 use_subgraph 时，构建层级子图（不是平铺 FanOut）
     async fn run_batch_with_framework(
         config: &Config,
         task: &str,
@@ -1218,7 +1254,7 @@ impl AgentEngine {
 
     /// ── 兼容旧接口（一次性跑完所有批次） ──
     pub async fn plan_and_execute(config: &Config, task: String) -> Result<AgentExecResponse, GraphDemoError> {
-        let plan = Self::plan(config, task.clone(), String::new(), false, false).await?;
+        let plan = Self::plan(config, task.clone(), String::new(), false, false, false).await?;
         let (sid, mut all, _) = Self::execute_batch_start(config, task, plan.tasks, String::new(), None, None, false, false).await?;
         loop {
             let (batch, has_more) = Self::execute_batch_next(config, &sid, None, None).await?;
@@ -1323,7 +1359,7 @@ mod tests {
 
         // 单任务
         let batch1 = vec![make_task("A", vec![])];
-        let graph1 = AgentEngine::build_batch_graph(config.clone(), "test".into(), batch1, String::new(), String::new(), None, 3, None);
+        let graph1 = AgentEngine::build_batch_graph(config.clone(), "test".into(), batch1, String::new(), String::new(), None, 3, None, None, None);
         assert!(graph1.is_ok(), "单任务批次应该编译成功");
         let compiled = graph1.unwrap();
         let nodes = compiled.node_names();
@@ -1332,7 +1368,7 @@ mod tests {
 
         // 多任务
         let batch2 = vec![make_task("A", vec![]), make_task("B", vec![]), make_task("C", vec![])];
-        let graph2 = AgentEngine::build_batch_graph(config, "test".into(), batch2, String::new(), String::new(), None, 3, None);
+        let graph2 = AgentEngine::build_batch_graph(config, "test".into(), batch2, String::new(), String::new(), None, 3, None, None, None);
         assert!(graph2.is_ok(), "多任务批次应该编译成功");
         let compiled2 = graph2.unwrap();
         assert_eq!(compiled2.node_names().len(), 4); // dispatch + A + B + C
@@ -1427,6 +1463,8 @@ mod tests {
             String::new(),
             None,
             3,
+            None,
+            None,
             None,
         );
         assert!(graph.is_ok(), "批次图应该编译成功");
