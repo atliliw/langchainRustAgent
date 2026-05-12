@@ -8,7 +8,7 @@
 use langchainrust_agent::{
     config::Config,          // 配置管理（读取 config.toml）
     routes::create_router,   // 创建所有 API 路由
-    handlers::AppState,      // 全局状态，存放 API 服务和配置
+    handlers::{AppState, playground},  // 全局状态 + v2 handler
     services::ApiService,    // API 业务服务（核心逻辑）
 };
 
@@ -54,8 +54,14 @@ async fn main() {
         config: config.clone(),
     });
     
-    // 创建路由器（注册所有 API 路由）
-    let app = create_router(state);
+    // v2 API 路由（新的 Function Calling 引擎），先绑定状态再合并
+    use axum::Router;
+    let v2_router = Router::new()
+        .route("/api/v2/chat", axum::routing::post(playground::v2_chat))
+        .route("/api/v2/tools", axum::routing::get(playground::v2_tools))
+        .with_state(state.clone());
+    // 合并 v2 路由到主路由器
+    let app = create_router(state).merge(v2_router);
     
     // 解析地址字符串为实际地址
     let addr: std::net::SocketAddr = config.server_addr().parse()

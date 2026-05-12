@@ -20,6 +20,7 @@ pub mod test;       // 测试
 pub mod error;      // 错误定义
 pub mod aggregate;  // Agent 数据采集
 pub mod stats;      // API 统计
+pub mod playground; // v2 Playground API
 
 // 对外暴露：统一错误响应、全局状态类型
 pub use error::ApiErrorResponse;
