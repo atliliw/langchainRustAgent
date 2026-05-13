@@ -52,5 +52,16 @@ deploy_package/
 # Superpowers auto-generated docs
 /docs/superpowers/
 
+# Sisyphus working directory
+/.sisyphus/
+
+# Debug / temp files
+*.patch
+*.json
+subgraph-snapshot.yml
+agent-final.png
+subgraph-demo.png
+fix_typewriter.py
+
 # Example config (keep this one)
 !config.toml.example

@@ -10,6 +10,11 @@ pub mod aggregate_service;    // AI 聚合采集
 pub mod agent_executor;       // 真实 Agent 执行引擎
 pub mod tools;                // Agent 工具系统（可扩展工具注册）
 pub mod tool_calling;         // Function Calling 引擎（v2 API）
+pub mod mcp;                  // MCP 集成
+pub mod rate_limiter;         // Rate Limit 限流
+pub mod cost_tracker;         // Token 成本统计
+pub mod evaluate;             // Agent 评估引擎
+pub mod vision;               // 多模态 Vision
 pub mod verify;               // Agent 输出验证钩子
 pub mod pageindex;            // PageIndex 无向量 RAG
 

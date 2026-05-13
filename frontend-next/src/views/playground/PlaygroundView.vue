@@ -21,16 +21,25 @@
         </div>
         <div v-if="store.streaming" style="text-align:center;color:#94a3b8;font-size:13px;">⏳ Agent 思考中...</div>
       </div>
-      <div style="padding:12px 16px;border-top:1px solid #e2e8f0;display:flex;gap:8px;">
-        <el-input
-          v-model="input"
-          placeholder="输入你的问题..."
-          :disabled="store.streaming"
-          @keyup.enter="sendMessage"
-        />
-        <el-button type="primary" :loading="store.streaming" @click="sendMessage" style="width:100px;">
-          {{ store.streaming ? '发送中' : '发送' }}
-        </el-button>
+      <div style="padding:8px 16px;border-top:1px solid #e2e8f0;">
+        <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
+          <el-button size="small" @click="demoSearch" :disabled="store.streaming" style="background:#6366f1;color:white;border:none;">🔍 搜索演示</el-button>
+          <el-button size="small" @click="demoWeather" :disabled="store.streaming" style="background:#f59e0b;color:white;border:none;">🌤️ 天气演示</el-button>
+          <el-button size="small" @click="demoCode" :disabled="store.streaming" style="background:#10b981;color:white;border:none;">💻 代码演示</el-button>
+          <el-button size="small" @click="demoRag" :disabled="store.streaming" style="background:#8b5cf6;color:white;border:none;">📚 RAG 演示</el-button>
+          <el-button size="small" @click="demoMulti" :disabled="store.streaming" style="background:#ef4444;color:white;border:none;">🔄 多工具链</el-button>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <el-input
+            v-model="input"
+            placeholder="输入你的问题..."
+            :disabled="store.streaming"
+            @keyup.enter="sendMessage"
+          />
+          <el-button type="primary" :loading="store.streaming" @click="sendMessage" style="width:100px;">
+            {{ store.streaming ? '发送中' : '发送' }}
+          </el-button>
+        </div>
       </div>
     </div>
 
@@ -120,11 +129,17 @@ async function sendMessage() {
   scrollToBottom()
 
   try {
+      // 构建完整消息历史
+      const allMessages = [
+        ...store.messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content })),
+        { role: 'user', content: text },
+      ]
+      // 发送请求时带上完整上下文
       const resp = await fetch('/api/v2/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        message: text,
+        messages: allMessages,
         tools: true,
       }),
     })
@@ -158,7 +173,7 @@ async function sendMessage() {
         }
       }
     }
-    if (assistantMsg) store.addMessage({ role: 'assistant', content: assistantMsg })
+    // assistantMsg 已在 updateAssistantMessage 中添加，无需重复 addMessage
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : '未知错误'
     store.addMessage({ role: 'assistant', content: `❌ ${msg}` })
@@ -180,5 +195,17 @@ function updateAssistantMessage(content: string) {
 async function scrollToBottom() {
   await nextTick()
   if (chatRef.value) chatRef.value.scrollTop = chatRef.value.scrollHeight
+}
+
+// 演示场景
+function demoSearch()    { sendMessageWith('搜索一下最近 Rust 语言的最新动态和版本更新') }
+function demoWeather()   { sendMessageWith('查询北京的天气怎么样') }
+function demoCode()      { sendMessageWith('用 Python 写一个计算斐波那契数列的函数，并计算第 20 项') }
+function demoRag()       { sendMessageWith('从知识库中搜索 Go 语言的主要特点') }
+function demoMulti()     { sendMessageWith('先查一下北京的天气，然后用 Python 写一个根据温度给出穿衣建议的程序') }
+
+function sendMessageWith(text: string) {
+  input.value = text
+  sendMessage()
 }
 </script>

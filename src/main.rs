@@ -54,11 +54,19 @@ async fn main() {
         config: config.clone(),
     });
     
-    // v2 API 路由（新的 Function Calling 引擎），先绑定状态再合并
+    // v2 API 路由（所有新功能），先绑定状态再合并
     use axum::Router;
     let v2_router = Router::new()
         .route("/api/v2/chat", axum::routing::post(playground::v2_chat))
         .route("/api/v2/tools", axum::routing::get(playground::v2_tools))
+        .route("/api/v2/stats", axum::routing::get(playground::v2_stats))
+        .route("/api/v2/cost/record", axum::routing::post(playground::v2_record_cost))
+        .route("/api/v2/mcp/connect", axum::routing::post(playground::mcp_connect))
+        .route("/api/v2/mcp/tools", axum::routing::post(playground::mcp_list_tools))
+        .route("/api/v2/mcp/call", axum::routing::post(playground::mcp_call_tool))
+        .route("/api/v2/evaluate/run", axum::routing::post(playground::evaluate_run))
+        .route("/api/v2/evaluate/compare", axum::routing::post(playground::evaluate_compare))
+        .route("/api/v2/vision", axum::routing::post(playground::vision_analyze))
         .with_state(state.clone());
     // 合并 v2 路由到主路由器
     let app = create_router(state).merge(v2_router);
