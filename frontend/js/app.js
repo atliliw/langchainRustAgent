@@ -1716,14 +1716,16 @@ async function runAgentExecute() {
 
             let html = '<div id="agent-results-table" style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;margin-top:10px;">';
             html += '<h4 style="margin:0 0 10px 0;color:#7c3aed;">执行结果</h4>';
-            html += '<table style="width:100%"><thead><tr style="background:#f5f3ff;"><th>任务</th><th>输出</th><th style="width:60px;">验证</th><th style="width:70px;">耗时/Token</th></tr></thead><tbody>';
+            html += '<table style="width:100%"><thead><tr style="background:#f5f3ff;"><th>任务</th><th>输出</th><th style="width:60px;">验证</th><th style="width:70px;">耗时/Token</th><th style="width:40px;"></th></tr></thead><tbody>';
             _agentAllResults.forEach(r => {
                 const v = r.verify_retries || 0;
                 const vIcon = v === 0 ? '<span title="未验证或一次通过">\u2014</span>' : (v >= 3 ? '<span style="color:#ef4444;" title="验证失败3次">\u26A0\uFE0F</span>' : '<span style="color:#f59e0b;" title="验证后重试' + v + '次">\uD83D\uDD04' + v + '</span>');
+                const hasDetail = r.llm_prompt || r.api_request || r.llm_raw;
                 html += '<tr><td style="padding:8px;font-weight:bold;">' + escapeHtml(r.task_name) + '</td>';
                 html += '<td style="padding:8px;font-size:13px;">' + escapeHtml(r.output) + '</td>';
                 html += '<td style="padding:4px;font-size:12px;text-align:center;">' + vIcon + '</td>';
-                html += '<td style="padding:4px;font-size:10px;color:#94a3b8;text-align:center;line-height:1.6;">' + (r.duration_ms||0) + 'ms<br>' + (r.tokens||0) + 't</td></tr>';
+                html += '<td style="padding:4px;font-size:10px;color:#94a3b8;text-align:center;line-height:1.6;">' + (r.duration_ms||0) + 'ms<br>' + (r.tokens||0) + 't</td>';
+                html += '<td style="padding:4px;text-align:center;">' + (hasDetail ? '<button class="btn btn-small" style="font-size:11px;padding:2px 8px;" onclick="showLlmDetail(\'' + escapeHtml(r.task_name) + '\')">📋</button>' : '') + '</td></tr>';
             });
             html += '</tbody></table>';
             if (_agentCancelled) {
@@ -1847,14 +1849,16 @@ async function agentFetchAndShow(isFirst) {
 
         let html = '<div id="agent-results-table" style="border:1px solid #e2e8f0;border-radius:8px;padding:15px;margin-top:10px;">';
         html += '<h4 style="margin:0 0 10px 0;color:#7c3aed;">执行结果</h4>';
-        html += '<table style="width:100%"><thead><tr style="background:#f5f3ff;"><th>任务</th><th>输出</th><th style="width:60px;">验证</th><th style="width:70px;">耗时/Token</th></tr></thead><tbody>';
+        html += '<table style="width:100%"><thead><tr style="background:#f5f3ff;"><th>任务</th><th>输出</th><th style="width:60px;">验证</th><th style="width:70px;">耗时/Token</th><th style="width:40px;"></th></tr></thead><tbody>';
         _agentAllResults.forEach(r => {
             const v = r.verify_retries || 0;
             const vIcon = v === 0 ? '<span title="未验证或一次通过">—</span>' : (v >= 3 ? '<span style="color:#ef4444;" title="验证失败3次">⚠️</span>' : '<span style="color:#f59e0b;" title="验证后重试' + v + '次">🔄' + v + '</span>');
+            const hasDetail = r.llm_prompt || r.api_request || r.llm_raw;
             html += '<tr><td style="padding:8px;font-weight:bold;">' + escapeHtml(r.task_name) + '</td>';
             html += '<td style="padding:8px;font-size:13px;">' + escapeHtml(r.output) + '</td>';
             html += '<td style="padding:4px;font-size:12px;text-align:center;">' + vIcon + '</td>';
-            html += '<td style="padding:4px;font-size:10px;color:#94a3b8;text-align:center;line-height:1.6;">' + (r.duration_ms||0) + 'ms<br>' + (r.tokens||0) + 't</td></tr>';
+            html += '<td style="padding:4px;font-size:10px;color:#94a3b8;text-align:center;line-height:1.6;">' + (r.duration_ms||0) + 'ms<br>' + (r.tokens||0) + 't</td>';
+            html += '<td style="padding:4px;text-align:center;">' + (hasDetail ? '<button class="btn btn-small" style="font-size:11px;padding:2px 8px;" onclick="showLlmDetail(\'' + escapeHtml(r.task_name) + '\')">📋</button>' : '') + '</td></tr>';
         });
         html += '</tbody></table>';
 
@@ -1924,10 +1928,12 @@ async function agentFetchAndShow(isFirst) {
                     let row = document.createElement('tr');
                     const rv = r.verify_retries || 0;
                     const rIcon = rv === 0 ? '<span title="未验证或一次通过">--</span>' : (rv >= 3 ? '<span style="color:#ef4444;" title="验证失败3次">\u26A0\uFE0F</span>' : '<span style="color:#f59e0b;" title="验证后重试'+rv+'次">\uD83D\uDD04'+rv+'</span>');
+                    const hasDetail = r.llm_prompt || r.api_request || r.llm_raw;
                     row.innerHTML = '<td style="padding:8px;font-weight:bold;">' + escapeHtml(r.task_name) + '</td>'
                         + '<td style="padding:8px;font-size:13px;">' + escapeHtml(r.output) + '</td>'
                         + '<td style="padding:4px;font-size:12px;text-align:center;">' + rIcon + '</td>'
-                        + '<td style="padding:4px;font-size:10px;color:#94a3b8;text-align:center;line-height:1.6;">' + (r.duration_ms||0) + 'ms<br>' + (r.tokens||0) + 't</td>';
+                        + '<td style="padding:4px;font-size:10px;color:#94a3b8;text-align:center;line-height:1.6;">' + (r.duration_ms||0) + 'ms<br>' + (r.tokens||0) + 't</td>'
+                        + '<td style="padding:4px;text-align:center;">' + (hasDetail ? '<button class="btn btn-small" style="font-size:11px;padding:2px 8px;" onclick="showLlmDetail(\'' + escapeHtml(r.task_name) + '\')">📋</button>' : '') + '</td>';
                     tbody.appendChild(row);
                 });
             }
@@ -2545,4 +2551,54 @@ document.addEventListener('DOMContentLoaded', function() {
     loadLangGraphInfo();
     
     initDarkMode();
+});
+
+// ──── LLM 请求详情弹窗 ────
+function showLlmDetail(taskName) {
+    const r = _agentAllResults.find(x => x.task_name === taskName);
+    if (!r) return;
+    const prompt = r.llm_prompt || '(未捕获)';
+    const apiReq = r.api_request || '';
+    const raw = r.llm_raw || '(未捕获)';
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+    const modal = document.createElement('div');
+    modal.style.cssText = 'background:white;border-radius:12px;width:90%;max-width:900px;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.3);';
+    modal.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid #e2e8f0;">
+            <h3 style="margin:0;font-size:16px;">📋 ${escapeHtml(r.task_name)} <span style="font-size:12px;color:#64748b;font-weight:normal;">(${escapeHtml(r.tool || '')})</span></h3>
+            <button onclick="this.parentElement.parentElement.parentElement.remove()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#94a3b8;">✕</button>
+        </div>
+        <div style="flex:1;overflow-y:auto;padding:20px;">
+            ${apiReq ? `
+            <div style="margin-bottom:16px;">
+                <div style="font-size:12px;font-weight:bold;color:#6366f1;margin-bottom:6px;">📤 API 请求（JSON）</div>
+                <pre style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;font-size:12px;line-height:1.5;max-height:500px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0;">${escapeHtml(apiReq)}</pre>
+            </div>
+            ` : ''}
+            <div style="margin-bottom:16px;">
+                <div style="font-size:12px;font-weight:bold;color:#8b5cf6;margin-bottom:6px;">📝 Prompt 原文</div>
+                <pre style="background:#f5f3ff;border:1px solid #e2e8f0;border-radius:8px;padding:12px;font-size:12px;line-height:1.5;max-height:200px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0;">${escapeHtml(prompt)}</pre>
+            </div>
+            <div>
+                <div style="font-size:12px;font-weight:bold;color:#059669;margin-bottom:6px;">📥 响应（Raw）</div>
+                <pre style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px;font-size:12px;line-height:1.5;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0;">${escapeHtml(raw)}</pre>
+            </div>
+        </div>
+        <div style="padding:12px 20px;border-top:1px solid #e2e8f0;font-size:11px;color:#94a3b8;display:flex;gap:16px;">
+            <span>⏱ ${r.duration_ms || 0}ms</span>
+            <span>🎯 ${r.tokens || 0} tokens</span>
+            <span>🔧 ${escapeHtml(r.tool || '-')}</span>
+        </div>
+    `;
+    overlay.id = 'llm-modal-overlay';
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+}
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        const ov = document.getElementById('llm-modal-overlay');
+        if (ov) ov.remove();
+    }
 });

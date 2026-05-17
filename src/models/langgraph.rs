@@ -199,6 +199,15 @@ pub struct AgentExecResult {
     /// 验证重试次数（0=未验证或一次通过）
     #[serde(default)]
     pub verify_retries: u32,
+    /// 传递给 LLM 的完整请求（prompt/context）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub llm_prompt: String,
+    /// 实际发给 API 的 JSON 请求体
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_request: String,
+    /// LLM 返回的原始响应
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub llm_raw: String,
 }
 
 /// Agent 执行响应

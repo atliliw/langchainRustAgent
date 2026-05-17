@@ -101,6 +101,9 @@ pub async fn recover_sessions(pool: &SqlitePool) -> Vec<serde_json::Value> {
                 tokens: tok as usize,
                 input_summary: String::new(),
                 verify_retries: 0,
+                llm_prompt: String::new(),
+                api_request: String::new(),
+                llm_raw: String::new(),
             }
         }).collect();
 
@@ -324,25 +327,26 @@ impl AgentEngine {
         let tj = tool_entries.join(",");
 
         let routing_section = if use_routing {
-            "注意：如果任务需要根据中间结果决定下一步，必须创建 type=decision 的决策节点。\n\
-             决策节点不需要 tool，通过 routes 定义走向（key=结果, value=[任务1, 任务2, ...]）。\n\
-             routes 中每个 value 是任务名数组，只有数组里的任务才会受路由控制。\n\
-             不选中的路由上的所有任务会被自动跳过（包括它们下游的任务）。\
-             不在任何路由里的任务不受影响，依赖满足就会正常执行。\n\
-             规则：只把「需要条件判断才执行」的任务放路由里，始终要执行的（如最终汇总）不要放路由里。\n\
-             如果任务需要人工审批才能继续，创建 type=human_review 的审核节点。\n\
-             正确的示例：调研Go和Python后，判断信息是否充分：\n\
+            "【强制要求】你**必须**在规划中包含一个 type=decision 的「信息是否充分」判断节点。\n\
+             决策节点不需要 tool，通过 routes 定义走向。\n\
+             「充分」时直接去汇总，「不充分」时补充搜索再去汇总。\n\
+             汇总任务（llm_query）的 depends_on 只应依赖决策节点，不要依赖条件分支里的任务。\n\
+             强制结构如下：\n\
+             1. 先做 2-3 个最初搜索（rag_search）\n\
+             2. 然后「判断信息是否充分」（type=decision, depends_on=所有最初搜索）\n\
+             3. 「充分」分支：routes 中对应空数组（不需要额外任务）\n\
+             4. 「不充分」分支：routes 中对应补充搜索任务（web_search）\n\
+             5. 最后「回答用户问题」（llm_query, depends_on=[\"判断信息是否充分\"]）\n\
+             routes 格式：\"充分\":[], \"不充分\":[\"补充搜索A\",\"补充搜索B\"]\n\
+             正确的完整示例：\n\
                  [\n\
                    {\"name\":\"调研Go\",\"tool\":\"rag_search\",\"depends_on\":[],\"task_type\":\"normal\",\"input_template\":\"\"},\n\
                    {\"name\":\"调研Python\",\"tool\":\"rag_search\",\"depends_on\":[],\"task_type\":\"normal\",\"input_template\":\"\"},\n\
                    {\"name\":\"判断信息是否充分\",\"task_type\":\"decision\",\"depends_on\":[\"调研Go\",\"调研Python\"],\"routes\":{\"充分\":[],\"不充分\":[\"补充搜索Go\",\"补充搜索Python\"]},\"input_template\":\"\"},\n\
                    {\"name\":\"补充搜索Go\",\"tool\":\"web_search\",\"depends_on\":[\"判断信息是否充分\"],\"task_type\":\"normal\",\"input_template\":\"\"},\n\
                    {\"name\":\"补充搜索Python\",\"tool\":\"web_search\",\"depends_on\":[\"判断信息是否充分\"],\"task_type\":\"normal\",\"input_template\":\"\"},\n\
-                    {\"name\":\"写对比\",\"tool\":\"llm_query\",\"depends_on\":[\"判断信息是否充分\"],\"task_type\":\"normal\",\"input_template\":\"\"}\n\
-                  ]\n\
-              重要：汇总任务不要放在路由里，这样无论如何都会执行。\n\
-              汇总任务的 depends_on 只应依赖决策节点和初始搜索任务，不要依赖条件分支里的任务。\n\
-              因为条件分支的任务可能被跳过，导致汇总任务也被级联跳过。\n"
+                    {\"name\":\"回答用户问题\",\"tool\":\"llm_query\",\"depends_on\":[\"判断信息是否充分\"],\"task_type\":\"normal\",\"input_template\":\"\"}\n\
+                  ]\n"
         } else {
             ""
         };
@@ -646,6 +650,17 @@ impl AgentEngine {
                     let registry = Arc::new(reg);
                     let spawn_progress_tx = progress_tx.clone();
                     let spawn_verify = verify_hook.clone();
+                    let llm_prompt = if ctx.is_empty() {
+                        format!("任务：{}\n当前子任务：{}\n\n{}", task, at.description, rag)
+                    } else {
+                        format!("任务：{}\n当前子任务：{}\n\n前置完成的任务结果：\n{}\n\n{}", task, at.description, ctx, rag)
+                    };
+                    let api_request = serde_json::to_string_pretty(&serde_json::json!({
+                        "model": config.openai.chat_model,
+                        "messages": [{"role": "user", "content": llm_prompt}],
+                        "max_tokens": 2048,
+                        "temperature": 0.7,
+                    })).unwrap_or_default();
                     let handle = tokio::spawn(async move {
                         let (output, tokens, verify_retries) = match at.task_type.as_str() {
                             "human_review" => (format!("⏸️ 待人工审批：{}", at.description), 0, 0u32),
@@ -715,7 +730,7 @@ impl AgentEngine {
                                 let _ = tx.send(serde_json::json!({"type":"task_complete","task":task_name,"tool":tool_name,"duration_ms":elapsed,"tokens":tokens}).to_string());
                             }
                             let mut ns = state;
-                            ns.add_message(MessageEntry::ai(serde_json::json!({"task":task_name,"output":output,"tokens":tokens,"duration_ms":elapsed,"tool":tool_name,"input_summary":input_template,"verify_retries":verify_retries}).to_string()));
+                            ns.add_message(MessageEntry::ai(serde_json::json!({"task":task_name,"output":output,"tokens":tokens,"duration_ms":elapsed,"tool":tool_name,"input_summary":input_template,"verify_retries":verify_retries,"llm_prompt":llm_prompt,"api_request":api_request,"llm_raw":output}).to_string()));
                             Ok(StateUpdate::full(ns))
                         }
                         Err(e) => {
@@ -725,7 +740,7 @@ impl AgentEngine {
                                 let _ = tx.send(serde_json::json!({"type":"task_error","task":task_name,"error":e.to_string()}).to_string());
                             }
                             let mut ns = state;
-                            ns.add_message(MessageEntry::ai(serde_json::json!({"task":task_name,"output":format!("任务 panic: {}",e),"tokens":0,"duration_ms":elapsed,"tool":tool_name,"input_summary":input_template}).to_string()));
+                            ns.add_message(MessageEntry::ai(serde_json::json!({"task":task_name,"output":format!("任务 panic: {}",e),"tokens":0,"duration_ms":elapsed,"tool":tool_name,"input_summary":input_template,"llm_prompt":"","api_request":"","llm_raw":""}).to_string()));
                             Ok(StateUpdate::full(ns))
                         }
                     }
@@ -760,6 +775,9 @@ impl AgentEngine {
                             tool: parsed["tool"].as_str().unwrap_or("").to_string(),
                             input_summary: parsed["input_summary"].as_str().unwrap_or("").to_string(),
                             verify_retries: parsed["verify_retries"].as_u64().unwrap_or(0) as u32,
+                            llm_prompt: parsed["llm_prompt"].as_str().unwrap_or("").to_string(),
+                            api_request: parsed["api_request"].as_str().unwrap_or("").to_string(),
+                            llm_raw: parsed["llm_raw"].as_str().unwrap_or("").to_string(),
                         });
                         break;
                     }
@@ -853,26 +871,30 @@ impl AgentEngine {
         let progress_tx_clone = progress_tx.clone();
         let results = Self::run_batch_with_framework(config, &task, &batch, &[], &rag_context, vector_store, Some(cancel_flag.clone()), Some(progress_tx), use_verify, use_subgraph, mcp_bridge).await?;
 
-        // 路由逻辑：如果本批有决策节点，跳过未选中的分支
+        // 路由逻辑：跳过未选中的分支
         let mut skipped_names: HashSet<String> = HashSet::new();
         let mut skipped_results: Vec<AgentExecResult> = Vec::new();
+        let route_members_set = Self::route_members(&agent_tasks);
         for r in &results {
-            if let Some(decided) = Self::parse_decision(&r.output) {
-                if let Some(task_def) = agent_tasks.iter().find(|t| t.name == r.task_name) {
-                    let mut matched = false;
-                    for (route_key, next_tasks) in &task_def.routes {
-                        if route_key == &decided {
-                            matched = true;
-                        } else {
-                            for task_name in next_tasks {
-                                Self::skip_downstream(&agent_tasks, task_name, &mut skipped_names, &mut skipped_results);
-                            }
-                        }
+            let task_def = match agent_tasks.iter().find(|t| t.name == r.task_name) {
+                Some(t) if t.task_type == "decision" => t,
+                _ => continue,
+            };
+            let decided = match Self::match_route_key(&r.output, &task_def.routes) {
+                Some(d) => d,
+                None => { tracing::info!("决策「{}」未匹配 route key", r.output); continue; }
+            };
+            for (route_key, next_tasks) in &task_def.routes {
+                if route_key != &decided {
+                    for task_name in next_tasks {
+                        Self::skip_downstream(&agent_tasks, task_name, &route_members_set, &mut skipped_names, &mut skipped_results);
                     }
-                    if !matched {
-                        // 决策结果未匹配任何 route 时不跳过任务，让后续任务正常执行
-                        tracing::info!("决策结果「{}」未匹配 route，后续任务继续执行", decided);
-                    }
+                }
+            }
+            // 自动跳过只依赖决策节点的 web_search 条件分支任务
+            for task in &agent_tasks {
+                if task.depends_on.contains(&r.task_name) && !route_members_set.contains(&task.name) && task.depends_on.len() == 1 && task.tool == "web_search" {
+                    Self::skip_downstream(&agent_tasks, &task.name, &route_members_set, &mut skipped_names, &mut skipped_results);
                 }
             }
         }
@@ -970,23 +992,27 @@ impl AgentEngine {
                         s.completed_names.insert(r.task_name.clone());
                     }
                 }
-                // 路由逻辑：决策节点结果出来后，跳过未选中的分支
+                // 路由逻辑：跳过未选中的分支
+                let route_members_set = Self::route_members(&all);
                 for r in &results {
-                    if let Some(decided) = Self::parse_decision(&r.output) {
-                        if let Some(task_def) = all.iter().find(|t| t.name == r.task_name) {
-                            let mut matched = false;
-                            for (route_key, next_tasks) in &task_def.routes {
-                                if route_key == &decided {
-                                    matched = true;
-                                } else {
-                                    for task_name in next_tasks {
-                                        Self::skip_downstream(&all, task_name, &mut s.completed_names, &mut s.done);
-                                    }
-                                }
+                    let task_def = match all.iter().find(|t| t.name == r.task_name) {
+                        Some(t) if t.task_type == "decision" => t,
+                        _ => continue,
+                    };
+                    let decided = match Self::match_route_key(&r.output, &task_def.routes) {
+                        Some(d) => d,
+                        None => { tracing::info!("决策「{}」未匹配 route key", r.output); continue; }
+                    };
+                    for (route_key, next_tasks) in &task_def.routes {
+                        if route_key != &decided {
+                            for task_name in next_tasks {
+                                Self::skip_downstream(&all, task_name, &route_members_set, &mut s.completed_names, &mut s.done);
                             }
-                            if !matched {
-                                tracing::info!("决策结果「{}」未匹配 route，后续任务继续执行", decided);
-                            }
+                        }
+                    }
+                    for task in &all {
+                        if task.depends_on.contains(&r.task_name) && !route_members_set.contains(&task.name) && task.depends_on.len() == 1 && task.tool == "web_search" {
+                            Self::skip_downstream(&all, &task.name, &route_members_set, &mut s.completed_names, &mut s.done);
                         }
                     }
                 }
@@ -1018,26 +1044,77 @@ impl AgentEngine {
     /// 从决策节点的输出中解析出选中的路由 key
     fn parse_decision(output: &str) -> Option<String> {
         let lower = output.to_lowercase();
-        // 按优先级匹配关键词，返回匹配到的原文（与 route key 保持一致）
         let keywords = ["不充分", "不通过", "not enough", "enough", "充分", "通过", "yes", "no", "tech", "general", "other"];
         for keyword in &keywords {
             if lower.contains(keyword) {
                 return Some(keyword.to_string());
             }
         }
-        // 如果包含中文的"充足"、"足够"等也判定为"充分"
         if lower.contains("充足") || lower.contains("足够") || lower.contains("够") {
             return Some("充分".to_string());
         }
-        // 如果包含"不足"、"缺少"等判定为"不充分"
         if lower.contains("不足") || lower.contains("缺少") {
             return Some("不充分".to_string());
         }
         None
     }
 
-    /// 把指定任务及其所有下游任务标记为"跳过"（加入 done）
-    fn skip_downstream(tasks: &[AgentTask], start: &str, done: &mut HashSet<String>, results: &mut Vec<AgentExecResult>) {
+    /// 用决策输出原文匹配 route key
+    fn match_route_key(output: &str, routes: &HashMap<String, Vec<String>>) -> Option<String> {
+        tracing::info!("match_route_key: output={}, routes={:?}", output, routes);
+        let lower = output.to_lowercase();
+        // 1. 精确匹配：route key 出现在输出中
+        for key in routes.keys() {
+            if lower.contains(&key.to_lowercase()) {
+                tracing::info!("  -> exact match: {}", key);
+                return Some(key.clone());
+            }
+        }
+        // 2. 判断是充分还是不充分，按 routes 的 value 空/非空来匹配
+        let is_insufficient = lower.contains("不充分") || lower.contains("不足") || lower.contains("缺少")
+            || lower.contains("不够") || lower.contains("需要补充") || lower.contains("还需")
+            || lower.contains("信息不足");
+        let is_sufficient = !is_insufficient && (lower.contains("足够") || lower.contains("充足") || lower.contains("够")
+            || lower.contains("不需要") || lower.contains("无需") || lower.contains("不必")
+            || lower.contains("已足够") || lower.contains("已经可以") || lower.contains("够了")
+            || lower.contains("信息充分") || lower.contains("不需补充") || lower.contains("不补充")
+            || lower.contains("充分"));
+        if is_sufficient {
+            // 找个空 value 的 route（充分分支不需要额外任务）
+            for (k, v) in routes {
+                if v.is_empty() { tracing::info!("  -> sufficient, matched empty route: {}", k); return Some(k.clone()); }
+            }
+            // 没有空 value 的，返回第一个 key
+            if let Some(k) = routes.keys().next() { tracing::info!("  -> sufficient, first route: {}", k); return Some(k.clone()); }
+        }
+        if is_insufficient {
+            // 找个非空 value 的 route（不充分分支需要补充搜索）
+            for (k, v) in routes {
+                if !v.is_empty() { tracing::info!("  -> insufficient, matched non-empty route: {}", k); return Some(k.clone()); }
+            }
+            if let Some(k) = routes.keys().next() { tracing::info!("  -> insufficient, first route: {}", k); return Some(k.clone()); }
+        }
+        // 3. parse_decision fallback
+        let fallback = Self::parse_decision(output);
+        tracing::info!("  -> parse_decision fallback: {:?}", fallback);
+        fallback
+    }
+
+    /// 收集所有路由成员（出现在任意 routes value 中的任务名）
+    fn route_members(tasks: &[AgentTask]) -> HashSet<String> {
+        let mut members = HashSet::new();
+        for t in tasks {
+            for (_key, next_tasks) in &t.routes {
+                for task_name in next_tasks {
+                    members.insert(task_name.clone());
+                }
+            }
+        }
+        members
+    }
+
+    /// 跳过指定任务及其下游路由成员（汇总任务不受影响）
+    fn skip_downstream(tasks: &[AgentTask], start: &str, route_members: &HashSet<String>, done: &mut HashSet<String>, results: &mut Vec<AgentExecResult>) {
         if done.contains(start) { return; }
         done.insert(start.to_string());
         results.push(AgentExecResult {
@@ -1048,11 +1125,14 @@ impl AgentEngine {
             duration_ms: 0,
             tokens: 0,
             verify_retries: 0,
+            llm_prompt: String::new(),
+            api_request: String::new(),
+            llm_raw: String::new(),
         });
-        // 递归标记下游
+        // 只级联跳过同样在路由中的下游任务
         for task in tasks {
-            if task.depends_on.contains(&start.to_string()) {
-                Self::skip_downstream(tasks, &task.name, done, results);
+            if task.depends_on.contains(&start.to_string()) && route_members.contains(&task.name) {
+                Self::skip_downstream(tasks, &task.name, route_members, done, results);
             }
         }
     }
@@ -1077,24 +1157,26 @@ impl AgentEngine {
                 done.insert(r.task_name.clone());
                 all_results.push(r.clone());
 
-                // 决策节点：根据 LLM 的决策结果跳过未选中的后续任务
-                if let Some(decided) = Self::parse_decision(&r.output) {
-                    // 找到这个决策任务对应的 AgentTask
-                    if let Some(task_def) = agent_tasks.iter().find(|t| t.name == r.task_name) {
-                        let mut matched = false;
-                        // 遍历 routes，把非选中的分支对应的后续任务标记为已完成（跳过）
-                        for (route_key, next_tasks) in &task_def.routes {
-                            if route_key == &decided {
-                                matched = true;
-                            } else {
-                                for task_name in next_tasks {
-                                    Self::skip_downstream(&agent_tasks, task_name, &mut done, &mut all_results);
-                                }
-                            }
+                // 决策节点：跳过未选中的分支
+                let task_def = match agent_tasks.iter().find(|t| t.name == r.task_name) {
+                    Some(t) if t.task_type == "decision" => t,
+                    _ => continue,
+                };
+                let route_members_set = Self::route_members(&agent_tasks);
+                let decided = match Self::match_route_key(&r.output, &task_def.routes) {
+                    Some(d) => d,
+                    None => { tracing::info!("决策「{}」未匹配 route key", r.output); continue; }
+                };
+                for (route_key, next_tasks) in &task_def.routes {
+                    if route_key != &decided {
+                        for task_name in next_tasks {
+                            Self::skip_downstream(&agent_tasks, task_name, &route_members_set, &mut done, &mut all_results);
                         }
-                        if !matched {
-                            tracing::warn!("决策结果「{}」未匹配任何 route，无对应分支可执行", decided);
-                        }
+                    }
+                }
+                for task in &agent_tasks {
+                    if task.depends_on.contains(&r.task_name) && !route_members_set.contains(&task.name) && task.depends_on.len() == 1 && task.tool == "web_search" {
+                        Self::skip_downstream(&agent_tasks, &task.name, &route_members_set, &mut done, &mut all_results);
                     }
                 }
             }
@@ -1156,6 +1238,9 @@ impl AgentEngine {
                 duration_ms: 0,
                 tokens: 0,
                 verify_retries: 0,
+                llm_prompt: String::new(),
+                api_request: String::new(),
+                llm_raw: String::new(),
             });
         } else {
             s.done.push(AgentExecResult {
@@ -1166,6 +1251,9 @@ impl AgentEngine {
                 duration_ms: 0,
                 tokens: 0,
                 verify_retries: 0,
+                llm_prompt: String::new(),
+                api_request: String::new(),
+                llm_raw: String::new(),
             });
             s.completed_names.insert(task_name.to_string());
         }
@@ -1506,6 +1594,7 @@ mod tests {
         let done = vec![AgentExecResult {
             task_name: "A".into(), tool: String::new(), input_summary: String::new(),
             output: "ok".into(), duration_ms: 0, tokens: 0, verify_retries: 0,
+            llm_prompt: String::new(), api_request: String::new(), llm_raw: String::new(),
         }];
         let completed: HashSet<String> = ["A"].into_iter().map(|s| s.to_string()).collect();
 

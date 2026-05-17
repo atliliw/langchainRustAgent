@@ -46,6 +46,7 @@ async fn main() {
 
     let api = Arc::new(api);
     let mcp_bridge = Arc::new(langchainrust_agent::services::mcp::mcp_bridge::McpBridge::new());
+    let mcp_bridge_for_state = mcp_bridge.clone();
     let mcp_server = langchainrust_agent::services::mcp::mcp_server::McpServerService::new(
         config.clone(),
         Some(api.vector_store.clone()),
@@ -54,7 +55,7 @@ async fn main() {
     let state = Arc::new(AppState {
         api,
         config: config.clone(),
-        mcp_bridge,
+        mcp_bridge: mcp_bridge_for_state,
         mcp_server,
     });
     
@@ -93,9 +94,25 @@ async fn main() {
         .with_state(state.clone());
     tracing::info!("MCP 服务运行在 http://{}（标准 MCP 协议）", mcp_addr);
     
-    // 启动两个服务，任一退出则整体退出
-    tokio::select! {
-        _ = axum::serve(listener, app) => {},
-        _ = axum::serve(mcp_listener, mcp_router) => {},
+    // 先启动 MCP 服务后台任务，再连 bridge
+    let _mcp_handle = tokio::spawn(async {
+        axum::serve(mcp_listener, mcp_router).await.unwrap();
+    });
+    
+    // 等待 MCP 服务就绪后，自动注册到 McpBridge（Agent 统一走 MCP 协议）
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let local_mcp_url = format!("http://{}:{}/", config.server.host, config.server.mcp_port);
+    let local_config = langchainrust_agent::services::mcp::mcp_client::McpServerConfig {
+        name: "__local__".to_string(),
+        url: local_mcp_url,
+        api_key: None,
+    };
+    mcp_bridge.register_server("__local__".into(), local_config);
+    match mcp_bridge.discover_and_cache("__local__").await {
+        Ok(tools) => tracing::info!("本地 MCP 已注册到 Bridge，发现 {} 个工具", tools.len()),
+        Err(e) => tracing::warn!("本地 MCP 注册失败: {}", e),
     }
+    
+    // 启动主服务（MCP 后台任务在另一个 task 中运行）
+    axum::serve(listener, app).await.unwrap();
 }
