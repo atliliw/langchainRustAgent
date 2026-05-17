@@ -1,15 +1,14 @@
 use crate::config::Config;
-use crate::services::tools::{ToolRegistry, ToolContext};
+use crate::services::tools::{ToolRegistry, ToolContext, AgentTool};
 use langchainrust::language_models::OpenAIChat;
 use langchainrust::core::tools::ToolDefinition;
-use langchainrust::schema::{Message, MessageType};
+use langchainrust::schema::Message;
 use langchainrust::core::runnables::Runnable;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 use tokio::sync::broadcast;
-use uuid::Uuid;
 use futures_util::stream::Stream;
 
 pub struct ToolCallingEngine;
@@ -59,9 +58,7 @@ fn sse_done() -> String {
 }
 
 impl ToolCallingEngine {
-    /// Convert ToolRegistry tools to OpenAI ToolDefinition format
-    fn build_tool_definitions() -> Vec<ToolDefinition> {
-        let registry = ToolRegistry::default_registry();
+    fn build_tool_definitions(registry: &ToolRegistry) -> Vec<ToolDefinition> {
         let mut tools = Vec::new();
         for (name, desc) in registry.list_descriptions() {
             let td = ToolDefinition::new(name.to_string(), desc.to_string())
@@ -80,7 +77,6 @@ impl ToolCallingEngine {
         tools
     }
 
-    /// Build a context string from completed results (current session context)
     fn build_context(ctx: &str, rag: &str) -> String {
         let mut parts = Vec::new();
         if !ctx.is_empty() {
@@ -92,8 +88,8 @@ impl ToolCallingEngine {
         parts.join("\n\n")
     }
 
-    /// Execute a single tool and return (output, tokens)
     async fn execute_tool(
+        registry: &ToolRegistry,
         config: &Config,
         tool_name: &str,
         args: &serde_json::Value,
@@ -102,7 +98,6 @@ impl ToolCallingEngine {
         cancel: Arc<AtomicBool>,
         progress: Option<broadcast::Sender<String>>,
     ) -> (String, usize) {
-        let registry = ToolRegistry::default_registry();
         let tool_ctx = ToolContext {
             config: config.clone(),
             task: String::new(),
@@ -125,21 +120,23 @@ impl ToolCallingEngine {
         }
     }
 
-    /// Chat with tool calling support. Returns an SSE stream.
     pub fn chat(
         config: Config,
         messages: Vec<ChatMessage>,
         rag_context: String,
+        extra_tools: Vec<Box<dyn AgentTool>>,
     ) -> impl Stream<Item = String> {
-        use futures_util::stream::{self, StreamExt};
-
         let stream = async_stream::stream! {
+            let mut registry = ToolRegistry::default_registry();
+            for tool in extra_tools {
+                registry.register(tool);
+            }
+
             let llm = OpenAIChat::new(
                 config.to_langchain_openai_config()
                     .with_max_tokens(4096)
             );
 
-            // Convert messages to langchainrust Message format
             let mut lc_messages: Vec<Message> = Vec::new();
             for msg in &messages {
                 let m = match msg.role.as_str() {
@@ -151,14 +148,17 @@ impl ToolCallingEngine {
                 lc_messages.push(m);
             }
 
-            // If there's RAG context, inject it as a system message
             if !rag_context.is_empty() {
                 lc_messages.insert(0, Message::system(
                     &format!("以下是知识库检索到的相关信息，请基于这些信息回答：\n\n{}", rag_context)
                 ));
             }
 
-            let tools = Self::build_tool_definitions();
+            let tools = if registry.is_empty() {
+                vec![]
+            } else {
+                Self::build_tool_definitions(&registry)
+            };
             let max_rounds = 5;
 
             for round in 0..max_rounds {
@@ -196,7 +196,7 @@ impl ToolCallingEngine {
 
                             let start = Instant::now();
                             let (output, tokens) = Self::execute_tool(
-                                &config, &tool_name, &args,
+                                &registry, &config, &tool_name, &args,
                                 "", "", Arc::new(AtomicBool::new(false)), None,
                             ).await;
                             let duration = start.elapsed().as_millis() as u64;
@@ -208,13 +208,13 @@ impl ToolCallingEngine {
                         }
                     }
                     Err(e) => {
-                        yield sse_text(&format!("❌ LLM 调用失败: {}", e));
+                        yield sse_text(&format!("LLM 调用失败: {}", e));
                         yield sse_done();
                         return;
                     }
                 }
             }
-            yield sse_text("⚠️ 已达到最大工具调用轮数");
+            yield sse_text("已达到最大工具调用轮数");
             yield sse_done();
         };
         stream

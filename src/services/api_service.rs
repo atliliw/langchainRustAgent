@@ -18,6 +18,7 @@ use crate::models::*;
 use crate::stores::*;
 use crate::stores::pageindex_store::PageIndexStore;
 use crate::utils::DocumentProcessor;
+use crate::services::mcp::mcp_bridge::McpBridge;
 use crate::services::LangGraphDemoService;
 use crate::services::pageindex::PageIndex;
 use crate::stores::ApiStatsSummary;
@@ -546,25 +547,25 @@ impl ApiService {
     
     /// ──────────────────── 真实 Agent 系统 ────────────────────
     
-    pub async fn agent_plan(&self, task: String, use_rag: bool, use_routing: bool, use_subgraph: bool) -> Result<AgentPlan, ApiError> {
+    pub async fn agent_plan(&self, task: String, use_rag: bool, use_routing: bool, use_subgraph: bool, mcp_bridge: Option<Arc<McpBridge>>) -> Result<AgentPlan, ApiError> {
         let rag_context = if use_rag {
             self.search_knowledge_base(&task, 5).await
         } else {
             String::new()
         };
-        crate::services::agent_executor::AgentEngine::plan(&self.config, task, rag_context, use_rag, use_routing, use_subgraph).await
+        crate::services::agent_executor::AgentEngine::plan(&self.config, task, rag_context, use_rag, use_routing, use_subgraph, mcp_bridge.as_deref()).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
     
-    pub async fn agent_batch_start(&self, task: String, agent_tasks: Vec<AgentTask>, use_rag: bool, use_verify: bool, use_subgraph: bool) -> Result<(String, Vec<AgentExecResult>, bool), ApiError> {
+    pub async fn agent_batch_start(&self, task: String, agent_tasks: Vec<AgentTask>, use_rag: bool, use_verify: bool, use_subgraph: bool, mcp_bridge: Option<Arc<McpBridge>>) -> Result<(String, Vec<AgentExecResult>, bool), ApiError> {
         let pool = self.conversation_store.pool();
         crate::services::agent_executor::AgentEngine::execute_batch_start(
-            &self.config, task, agent_tasks, String::new(), Some(self.vector_store.clone()), Some(pool), use_verify, use_subgraph
+            &self.config, task, agent_tasks, String::new(), Some(self.vector_store.clone()), Some(pool), use_verify, use_subgraph, mcp_bridge
         ).await.map_err(|e| ApiError::SearchError(e.to_string()))
     }
-    pub async fn agent_batch_next(&self, sid: &str) -> Result<(Vec<AgentExecResult>, bool), ApiError> {
+    pub async fn agent_batch_next(&self, sid: &str, mcp_bridge: Option<Arc<McpBridge>>) -> Result<(Vec<AgentExecResult>, bool), ApiError> {
         let pool = self.conversation_store.pool();
-        crate::services::agent_executor::AgentEngine::execute_batch_next(&self.config, sid, None, Some(pool)).await
+        crate::services::agent_executor::AgentEngine::execute_batch_next(&self.config, sid, None, Some(pool), mcp_bridge).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
     pub async fn agent_cancel(&self, session_id: &str) -> Result<(), ApiError> {
@@ -600,9 +601,9 @@ impl ApiService {
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
 
-    pub async fn agent_execute_all(&self, task: String, agent_tasks: Vec<AgentTask>, use_rag: bool, use_verify: bool, use_subgraph: bool) -> Result<AgentExecResponse, ApiError> {
+    pub async fn agent_execute_all(&self, task: String, agent_tasks: Vec<AgentTask>, use_rag: bool, use_verify: bool, use_subgraph: bool, mcp_bridge: Option<Arc<McpBridge>>) -> Result<AgentExecResponse, ApiError> {
         crate::services::agent_executor::AgentEngine::execute_all_batches(
-            &self.config, task, agent_tasks, String::new(), Some(self.vector_store.clone()), use_verify, use_subgraph
+            &self.config, task, agent_tasks, String::new(), Some(self.vector_store.clone()), use_verify, use_subgraph, mcp_bridge
         ).await.map_err(|e| ApiError::SearchError(e.to_string()))
     }
     
@@ -695,8 +696,8 @@ impl ApiService {
         })
     }
 
-    pub async fn agent_inject(&self, sid: &str, new_task: String) -> Result<crate::models::InjectResponse, ApiError> {
-        crate::services::agent_executor::AgentEngine::inject_new_tasks(&self.config, sid, new_task).await
+    pub async fn agent_inject(&self, sid: &str, new_task: String, mcp_bridge: Option<Arc<McpBridge>>) -> Result<crate::models::InjectResponse, ApiError> {
+        crate::services::agent_executor::AgentEngine::inject_new_tasks(&self.config, sid, new_task, mcp_bridge.as_deref()).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
 }

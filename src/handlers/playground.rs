@@ -40,7 +40,8 @@ pub async fn v2_chat(
     };
     let rag_context = request.rag.unwrap_or_default();
     let config = state.config.clone();
-    let stream = ToolCallingEngine::chat(config, messages, rag_context);
+    let mcp_tools = state.mcp_bridge.get_adapter_boxes();
+    let stream = ToolCallingEngine::chat(config, messages, rag_context, mcp_tools);
     let sse_stream = stream.map(|s| Ok(Event::default().data(s)));
     Ok(Sse::new(sse_stream))
 }
@@ -61,6 +62,7 @@ pub async fn v2_tools() -> Json<serde_json::Value> {
 // ── MCP ──
 
 pub async fn mcp_connect(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
     let name = request["name"].as_str().unwrap_or("").to_string();
@@ -70,7 +72,8 @@ pub async fn mcp_connect(
         return Err(ApiErrorResponse(axum::http::StatusCode::BAD_REQUEST, "缺少 name 或 url".into()));
     }
     let config = McpServerConfig { name: name.clone(), url, api_key };
-    match McpClient::list_tools(&config).await {
+    state.mcp_bridge.register_server(name.clone(), config);
+    match state.mcp_bridge.discover_and_cache(&name).await {
         Ok(tools) => Ok(Json(serde_json::json!({
             "success": true, "server": name, "tools": tools.iter().map(|t| serde_json::json!({
                 "name": t.name, "description": t.description
@@ -107,6 +110,37 @@ pub async fn mcp_call_tool(
         Ok(result) => Ok(Json(serde_json::json!({"result": result}))),
         Err(e) => Err(ApiErrorResponse(axum::http::StatusCode::BAD_GATEWAY, e)),
     }
+}
+
+// ── MCP Server ──
+
+/// MCP Server JSON-RPC 2.0 端点
+/// 外部 AI Agent 可以通过标准 MCP 协议调用此项目的内置工具
+pub async fn mcp_server_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    use crate::services::mcp::mcp_server::JsonRpcRequest;
+
+    let rpc_request: JsonRpcRequest = match serde_json::from_value(request) {
+        Ok(req) => req,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": {"code": -32700, "message": format!("Parse error: {}", e)}
+            }));
+        }
+    };
+
+    let id = rpc_request.id.clone();
+    let response = state.mcp_server.handle_request(rpc_request).await;
+
+    Json(serde_json::to_value(&response).unwrap_or_else(|_| serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {"code": -32603, "message": "Internal serialization error"}
+    })))
 }
 
 // ── Evaluate ──

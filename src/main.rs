@@ -12,7 +12,6 @@ use langchainrust_agent::{
     services::ApiService,    // API 业务服务（核心逻辑）
 };
 
-// Arc = 原子引用计数，让多个地方安全共享同一个数据
 use std::sync::Arc;
 
 #[tokio::main]
@@ -45,13 +44,18 @@ async fn main() {
         }
     }
 
-    // Arc::new 包装成线程安全共享引用
     let api = Arc::new(api);
+    let mcp_bridge = Arc::new(langchainrust_agent::services::mcp::mcp_bridge::McpBridge::new());
+    let mcp_server = langchainrust_agent::services::mcp::mcp_server::McpServerService::new(
+        config.clone(),
+        Some(api.vector_store.clone()),
+    );
     
-    // 全局状态 = API 服务 + 配置，传给所有路由处理函数
     let state = Arc::new(AppState {
         api,
         config: config.clone(),
+        mcp_bridge,
+        mcp_server,
     });
     
     // v2 API 路由（所有新功能），先绑定状态再合并
@@ -64,23 +68,34 @@ async fn main() {
         .route("/api/v2/mcp/connect", axum::routing::post(playground::mcp_connect))
         .route("/api/v2/mcp/tools", axum::routing::post(playground::mcp_list_tools))
         .route("/api/v2/mcp/call", axum::routing::post(playground::mcp_call_tool))
+        .route("/api/v2/mcp/server", axum::routing::post(playground::mcp_server_handler))
         .route("/api/v2/evaluate/run", axum::routing::post(playground::evaluate_run))
         .route("/api/v2/evaluate/compare", axum::routing::post(playground::evaluate_compare))
         .route("/api/v2/vision", axum::routing::post(playground::vision_analyze))
         .with_state(state.clone());
     // 合并 v2 路由到主路由器
-    let app = create_router(state).merge(v2_router);
+    let app = create_router(state.clone()).merge(v2_router);
     
-    // 解析地址字符串为实际地址
+    // ===== 主服务 (Web + API) =====
     let addr: std::net::SocketAddr = config.server_addr().parse()
         .expect("地址解析失败");
-    
-    tracing::info!("服务运行在 http://{}", addr);
-    tracing::info!("打开浏览器访问 http://{} 即可使用", addr);
-    
-    // 创建 TCP 监听器，绑定到指定端口
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    tracing::info!("Web 服务运行在 http://{}", addr);
     
-    // 使用 Axum 框架启动 HTTP 服务器
-    axum::serve(listener, app).await.unwrap();
+    // ===== MCP 服务 (标准 MCP 协议，供外部 AI Agent 连接) =====
+    let mcp_addr: std::net::SocketAddr = format!("{}:{}", config.server.host, config.server.mcp_port)
+        .parse().expect("MCP 地址解析失败");
+    let mcp_listener = tokio::net::TcpListener::bind(mcp_addr).await.unwrap();
+    
+    // MCP 端口只暴露 /api/v2/mcp/server 端点，按标准 JSON-RPC 2.0 响应
+    let mcp_router = axum::Router::new()
+        .route("/", axum::routing::post(playground::mcp_server_handler))
+        .with_state(state.clone());
+    tracing::info!("MCP 服务运行在 http://{}（标准 MCP 协议）", mcp_addr);
+    
+    // 启动两个服务，任一退出则整体退出
+    tokio::select! {
+        _ = axum::serve(listener, app) => {},
+        _ = axum::serve(mcp_listener, mcp_router) => {},
+    }
 }

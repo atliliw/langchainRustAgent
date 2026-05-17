@@ -6,7 +6,7 @@
 <meta http-equiv="Pragma" content="no-cache">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LangChainRust Demo - 向量搜索 + RAG 对话</title>
-    <link rel="stylesheet" href="css/style.css?t=20260510v4">
+    <link rel="stylesheet" href="css/style.css?t=20260517v1">
 </head>
 <body>
     <button class="dark-mode-toggle" onclick="toggleDarkMode()">🌙 深色模式</button>
@@ -22,6 +22,7 @@
                 <div class="nav-item" onclick="showTab('chat')">💬 RAG对话</div>
                 <div class="nav-item" onclick="showTab('langgraph')">🔗 LangGraph</div>
                 <div class="nav-item" onclick="showTab('agent')">🤖 Agent</div>
+                <div class="nav-item" onclick="showTab('mcp')">🔌 MCP</div>
                 <div class="nav-item" onclick="showTab('aggregate')">🌐 AI聚合</div>
                 <div class="nav-item" onclick="showTab('monitor')">📊 系统监控</div>
                 <div class="nav-item" onclick="showTab('compress')">⚙️ 压缩策略</div>
@@ -270,6 +271,63 @@
             <div id="agent-stats" style="display:none;margin-top:10px;"></div>
             <div id="agent-log-detail" style="display:none;margin-top:10px;"></div>
         </div>
+
+        <div id="mcp-tab" class="card hidden">
+            <h2>🔌 MCP</h2>
+            <p style="color: #666; margin-bottom: 15px;">内置 MCP 服务（端口 8093）将项目工具暴露为标准 MCP 协议；连接外部 MCP 服务器后工具自动注入 Agent 执行引擎</p>
+
+            <!-- ── 本地 MCP 工具 ── -->
+            <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:20px;margin-bottom:20px;">
+                <h3 style="margin:0 0 15px 0;font-size:16px;color:#1e40af;">🖥️ 本地 MCP 服务</h3>
+                <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
+                    <span style="font-size:12px;color:#64748b;">端点：</span>
+                    <code style="font-size:12px;background:#e2e8f0;padding:2px 8px;border-radius:4px;">http://192.168.10.100:8093/</code>
+                    <span id="mcp-server-status" style="font-size:12px;color:#16a34a;">🟢 运行中</span>
+                </div>
+                <div id="local-mcp-tools" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;">
+                    <p style="color:#94a3b8;font-size:13px;">加载中...</p>
+                </div>
+                <div style="margin-top:12px;font-size:12px;color:#64748b;">
+                    <span>这些工具可以通过 MCP 协议被外部 AI Agent（如 Claude Desktop、Cursor）直接调用。</span>
+                </div>
+            </div>
+
+            <!-- ── 外部 MCP 服务器管理 ── -->
+            <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px;margin-bottom:16px;">
+                <strong style="color:#166534;">📌 外部 MCP 服务器</strong>
+                <p style="color:#166534;font-size:13px;margin:4px 0 0 0;">
+                    连接外部 MCP 服务器 → 自动发现工具 → 在 Agent/LangGraph 规划时 LLM 就能看到并调用这些工具。
+                    连接成功后无需额外配置。
+                </p>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+                <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:20px;">
+                    <h3 style="margin:0 0 15px 0;font-size:16px;color:#1e40af;">➕ 连接新服务器</h3>
+                    <div class="form-group">
+                        <label>名称</label>
+                        <input type="text" id="mcp-name" placeholder="例如: playwright" style="width:100%;padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;">
+                    </div>
+                    <div class="form-group">
+                        <label>URL</label>
+                        <input type="text" id="mcp-url" placeholder="http://localhost:3100" style="width:100%;padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;">
+                    </div>
+                    <div class="form-group">
+                        <label>API Key（可选）</label>
+                        <input type="password" id="mcp-apikey" placeholder="留空则不需要认证" style="width:100%;padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;">
+                    </div>
+                    <button class="btn" onclick="connectMcpServer()" style="margin-top:10px;width:100%;">🔗 连接</button>
+                    <div id="mcp-connect-status" style="margin-top:10px;font-size:13px;"></div>
+                </div>
+
+                <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:20px;">
+                    <h3 style="margin:0 0 15px 0;font-size:16px;color:#1e40af;">📋 已连接服务器</h3>
+                    <div id="mcp-servers-list">
+                        <p style="color:#94a3b8;font-size:13px;">暂无连接，请在左侧添加</p>
+                    </div>
+                </div>
+            </div>
+        </div>
         
         <div id="aggregate-tab" class="card hidden">
             <h2>🌐 AI信息聚合</h2>
@@ -481,7 +539,7 @@
         </div>
     </div>
     
-    <script src="js/app.js?t=20260512v3"></script>
+    <script src="js/app.js?t=20260517v1"></script>
     <script src="js/aggregate.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </body>

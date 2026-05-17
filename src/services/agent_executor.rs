@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::errors::GraphDemoError;
 use crate::models::*;
+use crate::services::mcp::mcp_bridge::McpBridge;
 use crate::services::tools::{ToolRegistry, ToolContext};
 use crate::services::verify::{CompositeVerifyHook, VerifyHook};
 use crate::stores::QdrantStore;
@@ -303,12 +304,24 @@ impl AgentEngine {
     }
 
     /// ── 规划 ──
-    pub async fn plan(config: &Config, task: String, rag_context: String, use_rag: bool, use_routing: bool, use_subgraph: bool) -> Result<AgentPlan, GraphDemoError> {
+    pub async fn plan(config: &Config, task: String, rag_context: String, use_rag: bool, use_routing: bool, use_subgraph: bool, mcp_bridge: Option<&McpBridge>) -> Result<AgentPlan, GraphDemoError> {
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
         let registry = ToolRegistry::default_registry();
-        let tj = registry.list_descriptions().iter()
+        let mut tool_entries: Vec<String> = registry.list_descriptions().iter()
             .map(|(n,d)| format!("{{\"name\":\"{}\",\"description\":\"{}\"}}", n, d))
-            .collect::<Vec<_>>().join(",");
+            .collect();
+        // 追加 MCP 工具描述，让 LLM 规划时知道可以调用
+        if let Some(bridge) = mcp_bridge {
+            let adapters = bridge.get_adapter_boxes();
+            for adapter in &adapters {
+                tool_entries.push(format!(
+                    "{{\"name\":\"{}\",\"description\":\"{}\"}}",
+                    adapter.name(),
+                    adapter.description()
+                ));
+            }
+        }
+        let tj = tool_entries.join(",");
 
         let routing_section = if use_routing {
             "注意：如果任务需要根据中间结果决定下一步，必须创建 type=decision 的决策节点。\n\
@@ -542,6 +555,7 @@ impl AgentEngine {
         progress_tx: Option<broadcast::Sender<String>>,
         verify_hook: Option<Arc<CompositeVerifyHook>>,
         use_subgraph: bool,
+        mcp_bridge: Option<Arc<McpBridge>>,
     ) -> Result<CompiledGraph<AgentState>, GraphDemoError> {
         let mut graph = StateGraph::<AgentState>::new();
         let semaphore = Arc::new(Semaphore::new(max_concurrency));
@@ -564,6 +578,7 @@ impl AgentEngine {
             let cancel = cancel.clone();
             let progress_tx = progress_tx.clone();
             let verify_hook = verify_hook.clone();
+            let mcp_bridge = mcp_bridge.clone();
 
             // 子图模式：每个 rag_search 任务使用搜索→提取子图（独立状态类型）
             if use_subgraph && at.tool == "rag_search" {
@@ -599,6 +614,7 @@ impl AgentEngine {
                 let cancel = cancel.clone();
                 let progress_tx = progress_tx.clone();
                 let verify_hook = verify_hook.clone();
+                let mcp_bridge = mcp_bridge.clone();
 
                 async move {
                     if cancel.load(Ordering::Relaxed) {
@@ -621,7 +637,13 @@ impl AgentEngine {
                     if let Some(ref tx) = progress_tx {
                         let _ = tx.send(serde_json::json!({"type":"task_start","task":at.name,"tool":at.tool}).to_string());
                     }
-                    let registry = Arc::new(ToolRegistry::default_registry());
+                    let mut reg = ToolRegistry::default_registry();
+                    if let Some(ref bridge) = mcp_bridge {
+                        for tool in bridge.get_adapter_boxes() {
+                            reg.register(tool);
+                        }
+                    }
+                    let registry = Arc::new(reg);
                     let spawn_progress_tx = progress_tx.clone();
                     let spawn_verify = verify_hook.clone();
                     let handle = tokio::spawn(async move {
@@ -779,6 +801,7 @@ impl AgentEngine {
         progress_tx: Option<broadcast::Sender<String>>,
         use_verify: bool,
         use_subgraph: bool,
+        mcp_bridge: Option<Arc<McpBridge>>,
     ) -> Result<Vec<AgentExecResult>, GraphDemoError> {
         let ctx: String = context.iter()
             .map(|r| format!("【{}】\n{}", r.task_name, r.output))
@@ -807,6 +830,7 @@ impl AgentEngine {
             progress_tx,
             verify_hook,
             use_subgraph,
+            mcp_bridge,
         )?;
 
         let initial = AgentState::new(task.to_string());
@@ -818,7 +842,7 @@ impl AgentEngine {
 
     /// ── 开始执行（返回第一批结果 + session_id） ──
     /// 使用框架 invoke_parallel 并行执行第一批就绪任务
-    pub async fn execute_batch_start(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>, pool: Option<SqlitePool>, use_verify: bool, use_subgraph: bool) -> Result<(String, Vec<AgentExecResult>, bool), GraphDemoError> {
+    pub async fn execute_batch_start(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>, pool: Option<SqlitePool>, use_verify: bool, use_subgraph: bool, mcp_bridge: Option<Arc<McpBridge>>) -> Result<(String, Vec<AgentExecResult>, bool), GraphDemoError> {
         let sid = Uuid::new_v4().to_string();
         let done: HashSet<String> = HashSet::new();
         let batch = Self::ready_batch(&agent_tasks, &done);
@@ -827,7 +851,7 @@ impl AgentEngine {
         let cancel_flag = get_cancel_flag(&sid);
         let (progress_tx, _) = broadcast::channel::<String>(32);
         let progress_tx_clone = progress_tx.clone();
-        let results = Self::run_batch_with_framework(config, &task, &batch, &[], &rag_context, vector_store, Some(cancel_flag.clone()), Some(progress_tx), use_verify, use_subgraph).await?;
+        let results = Self::run_batch_with_framework(config, &task, &batch, &[], &rag_context, vector_store, Some(cancel_flag.clone()), Some(progress_tx), use_verify, use_subgraph, mcp_bridge).await?;
 
         // 路由逻辑：如果本批有决策节点，跳过未选中的分支
         let mut skipped_names: HashSet<String> = HashSet::new();
@@ -899,7 +923,7 @@ impl AgentEngine {
 
     /// ── 下一批 ──
     /// 使用框架 invoke_parallel 并行执行下一批就绪任务
-    pub async fn execute_batch_next(config: &Config, sid: &str, vector_store: Option<Arc<QdrantStore>>, pool: Option<SqlitePool>) -> Result<(Vec<AgentExecResult>, bool), GraphDemoError> {
+    pub async fn execute_batch_next(config: &Config, sid: &str, vector_store: Option<Arc<QdrantStore>>, pool: Option<SqlitePool>, mcp_bridge: Option<Arc<McpBridge>>) -> Result<(Vec<AgentExecResult>, bool), GraphDemoError> {
         {
             let g = store().lock().unwrap();
             if let Some(s) = g.as_ref().unwrap().get(sid) {
@@ -928,7 +952,7 @@ impl AgentEngine {
             let sub = s.map(|s| s.use_subgraph).unwrap_or(false);
             (ctx, tx, verify, sub)
         };
-        let results = Self::run_batch_with_framework(config, &task, &batch, &context, &rag_context, vector_store, Some(get_cancel_flag(sid)), progress_tx, use_verify, use_subgraph).await?;
+        let results = Self::run_batch_with_framework(config, &task, &batch, &context, &rag_context, vector_store, Some(get_cancel_flag(sid)), progress_tx, use_verify, use_subgraph, mcp_bridge).await?;
 
     let new_review_pending: Vec<AgentTask> = batch.iter()
             .filter(|t| t.task_type == "human_review")
@@ -1035,7 +1059,7 @@ impl AgentEngine {
 
     /// ── 按依赖分批并行执行：同批任务 invoke_parallel 并行，不同批串行 ──
     /// 例: A → [B, C] → D  => 第一批: A, 第二批: B+C(并行), 第三批: D
-    pub async fn execute_all_batches(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>, use_verify: bool, use_subgraph: bool) -> Result<AgentExecResponse, GraphDemoError> {
+    pub async fn execute_all_batches(config: &Config, task: String, agent_tasks: Vec<AgentTask>, rag_context: String, vector_store: Option<Arc<QdrantStore>>, use_verify: bool, use_subgraph: bool, mcp_bridge: Option<Arc<McpBridge>>) -> Result<AgentExecResponse, GraphDemoError> {
         let total_start = Instant::now();
 
         let mut done: HashSet<String> = HashSet::new();
@@ -1047,7 +1071,7 @@ impl AgentEngine {
                 break;
             }
 
-            let results = Self::run_batch_with_framework(config, &task, &batch, &all_results, &rag_context, vector_store.clone(), None, None, use_verify, use_subgraph).await?;
+            let results = Self::run_batch_with_framework(config, &task, &batch, &all_results, &rag_context, vector_store.clone(), None, None, use_verify, use_subgraph, mcp_bridge.clone()).await?;
 
             for r in &results {
                 done.insert(r.task_name.clone());
@@ -1253,11 +1277,11 @@ impl AgentEngine {
     }
 
     /// ── 兼容旧接口（一次性跑完所有批次） ──
-    pub async fn plan_and_execute(config: &Config, task: String) -> Result<AgentExecResponse, GraphDemoError> {
-        let plan = Self::plan(config, task.clone(), String::new(), false, false, false).await?;
-        let (sid, mut all, _) = Self::execute_batch_start(config, task, plan.tasks, String::new(), None, None, false, false).await?;
+    pub async fn plan_and_execute(config: &Config, task: String, mcp_bridge: Option<Arc<McpBridge>>) -> Result<AgentExecResponse, GraphDemoError> {
+        let plan = Self::plan(config, task.clone(), String::new(), false, false, false, mcp_bridge.as_deref()).await?;
+        let (sid, mut all, _) = Self::execute_batch_start(config, task, plan.tasks, String::new(), None, None, false, false, mcp_bridge.clone()).await?;
         loop {
-            let (batch, has_more) = Self::execute_batch_next(config, &sid, None, None).await?;
+            let (batch, has_more) = Self::execute_batch_next(config, &sid, None, None, mcp_bridge.clone()).await?;
             all.extend(batch);
             if !has_more { break; }
         }
@@ -1271,6 +1295,7 @@ impl AgentEngine {
         config: &Config,
         sid: &str,
         new_task: String,
+        mcp_bridge: Option<&McpBridge>,
     ) -> Result<crate::models::InjectResponse, GraphDemoError> {
         // 1. 获取当前 session 状态
         let (original_task, all, done, completed_names, has_review) = {
@@ -1302,9 +1327,19 @@ impl AgentEngine {
         // 3. 调 LLM 规划新任务的子任务
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
         let registry = crate::services::tools::ToolRegistry::default_registry();
-        let tj = registry.list_descriptions().iter()
+        let mut tool_entries: Vec<String> = registry.list_descriptions().iter()
             .map(|(n,d)| format!("{{\"name\":\"{}\",\"description\":\"{}\"}}", n, d))
-            .collect::<Vec<_>>().join(",");
+            .collect();
+        if let Some(bridge) = mcp_bridge {
+            for adapter in bridge.get_adapter_boxes() {
+                tool_entries.push(format!(
+                    "{{\"name\":\"{}\",\"description\":\"{}\"}}",
+                    adapter.name(),
+                    adapter.description()
+                ));
+            }
+        }
+        let tj = tool_entries.join(",");
 
         let prompt = format!(
             r#"你正在执行一个多步骤任务。用户在执行过程中提出了新需求。

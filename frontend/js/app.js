@@ -29,6 +29,7 @@ function showTab(name) {
     if (name === 'documents') loadDocuments();
     if (name === 'monitor') loadMonitorStats();
     if (name === 'compress') { updateCompressExp(); showModeDetail('layered'); }
+    if (name === 'mcp') { loadMcpServers(); loadLocalMcpTools(); }
 }
 
 async function loadDocuments() {
@@ -2301,6 +2302,194 @@ async function loadAgentStats() {
         div.innerHTML = html;
     } catch (e) {
         div.innerHTML = `<div style="color:#e94560;padding:20px;">❌ ${e.message}</div>`;
+    }
+}
+
+// ──── MCP 服务器管理 ────
+
+async function loadLocalMcpTools() {
+    const container = document.getElementById('local-mcp-tools');
+    if (!container) return;
+    try {
+        const res = await fetch(`${API_BASE}/v2/tools`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!data.tools || data.tools.length === 0) {
+            container.innerHTML = '<p style="color:#94a3b8;font-size:13px;">暂无可用工具</p>';
+            return;
+        }
+        let html = '';
+        for (const tool of data.tools) {
+            const params = tool.parameters || {};
+            const props = params.properties || {};
+            const required = params.required || [];
+            let paramsHtml = '';
+            let first = true;
+            for (const [key, val] of Object.entries(props)) {
+                const req = required.includes(key) ? '<span style="color:#e94560;font-size:11px;">*必填</span>' : '';
+                paramsHtml += `${first ? '' : ', '}<code style="font-size:11px;background:#e2e8f0;padding:1px 5px;border-radius:3px;">${escapeHtml(key)}</code><span style="font-size:11px;color:#64748b;"> ${val.description || ''}${req}</span>`;
+                first = false;
+            }
+            html += `<div style="background:white;border:1px solid #e2e8f0;border-radius:10px;padding:14px;">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;">
+                    <div>
+                        <strong style="font-size:14px;color:#1e40af;">${escapeHtml(tool.name)}</strong>
+                        <span style="font-size:11px;color:#64748b;margin-left:6px;background:#e0f2fe;padding:1px 6px;border-radius:4px;">MCP</span>
+                    </div>
+                    <button class="btn btn-small" style="font-size:11px;" onclick="testLocalMcpTool('${escapeHtml(tool.name)}')">测试</button>
+                </div>
+                <div style="font-size:12px;color:#475569;margin-bottom:8px;">${escapeHtml(tool.description)}</div>
+                <div style="font-size:11px;color:#64748b;">
+                    <span style="font-weight:600;">参数：</span>
+                    ${paramsHtml || '<span style="color:#94a3b8;font-style:italic;">无参数</span>'}
+                </div>
+            </div>`;
+        }
+        container.innerHTML = html;
+    } catch (e) {
+        container.innerHTML = `<p style="color:#e94560;font-size:13px;">❌ 加载失败: ${e.message}</p>`;
+        document.getElementById('mcp-server-status').innerHTML = '🔴 未运行';
+    }
+}
+
+async function testLocalMcpTool(name) {
+    const params = {name, arguments: {}};
+    if (name === 'rag_search' || name === 'web_search') {
+        const q = prompt('输入查询内容:');
+        if (!q) return;
+        params.arguments.query = q;
+    } else if (name === 'llm_query') {
+        const p = prompt('输入提示词:');
+        if (!p) return;
+        params.arguments.prompt = p;
+    } else if (name === 'weather') {
+        const c = prompt('输入城市名:');
+        if (!c) return;
+        params.arguments.city = c;
+    } else {
+        const input = prompt(`输入 ${name} 的参数:`);
+        if (!input) return;
+        params.arguments.query = input;
+    }
+    const btn = event.target;
+    const orig = btn.textContent;
+    btn.textContent = '⏳';
+    btn.disabled = true;
+    try {
+        const res = await fetch(`${API_BASE}/v2/mcp/server`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({jsonrpc: '2.0', id: 1, method: 'tools/call', params})
+        });
+        const data = await res.json();
+        const text = data.result?.content?.[0]?.text || JSON.stringify(data.error || data);
+        alert('结果:\n\n' + text.substring(0, 2000));
+    } catch (e) {
+        alert('调用失败: ' + e.message);
+    }
+    btn.textContent = orig;
+    btn.disabled = false;
+}
+
+async function loadMcpServers() {
+    const listEl = document.getElementById('mcp-servers-list');
+    if (!listEl) return;
+    try {
+        const res = await fetch(`${API_BASE}/v2/mcp/tools`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({url: '__list__'})
+        });
+        // This API is for listing tools from a specific server.
+        // For listing registered servers, we track them in localStorage.
+        const servers = JSON.parse(localStorage.getItem('mcp_servers') || '[]');
+        if (servers.length === 0) {
+            listEl.innerHTML = '<p style="color:#94a3b8;font-size:13px;">暂无连接，请在左侧添加</p>';
+            return;
+        }
+        let html = '';
+        for (const srv of servers) {
+            const status = srv.connected ? '🟢 已连接' : '🔴 未连接';
+            html += `<div style="background:white;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-bottom:10px;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                    <div>
+                        <strong>${escapeHtml(srv.name)}</strong>
+                        <span style="font-size:12px;color:#64748b;margin-left:8px;">${status}</span>
+                    </div>
+                    <button class="btn btn-small btn-danger" onclick="disconnectMcpServer('${escapeHtml(srv.name)}')">断开</button>
+                </div>
+                <div style="font-size:12px;color:#64748b;">
+                    <div>URL: ${escapeHtml(srv.url)}</div>
+                    <div id="mcp-tools-${escapeHtml(srv.name)}">
+                        ${srv.tools && srv.tools.length 
+                            ? `<span style="color:#16a34a;">工具(${srv.tools.length}): ${srv.tools.map(t => escapeHtml(t.name)).join(', ')}</span>`
+                            : '<span style="color:#94a3b8;">未发现工具</span>'}
+                    </div>
+                </div>
+            </div>`;
+        }
+        listEl.innerHTML = html;
+    } catch (e) {
+        listEl.innerHTML = `<p style="color:#e94560;font-size:13px;">❌ 加载失败: ${e.message}</p>`;
+    }
+}
+
+async function connectMcpServer() {
+    const nameEl = document.getElementById('mcp-name');
+    const urlEl = document.getElementById('mcp-url');
+    const keyEl = document.getElementById('mcp-apikey');
+    const statusEl = document.getElementById('mcp-connect-status');
+    
+    const name = nameEl.value.trim();
+    const url = urlEl.value.trim();
+    const api_key = keyEl.value.trim() || undefined;
+    
+    if (!name || !url) {
+        statusEl.innerHTML = '<span style="color:#e94560;">⚠️ 请填写名称和 URL</span>';
+        return;
+    }
+    
+    statusEl.innerHTML = '<span style="color:#6366f1;">⏳ 连接中...</span>';
+    
+    try {
+        const res = await fetch(`${API_BASE}/v2/mcp/connect`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name, url, api_key})
+        });
+        const data = await res.json();
+        
+        if (data.success) {
+            statusEl.innerHTML = `<span style="color:#16a34a;">✅ 连接成功！发现 ${data.tools.length} 个工具</span>`;
+            const servers = JSON.parse(localStorage.getItem('mcp_servers') || '[]');
+            const idx = servers.findIndex(s => s.name === name);
+            const entry = {name, url, api_key: !!api_key, connected: true, tools: data.tools, connectedAt: new Date().toISOString()};
+            if (idx >= 0) servers[idx] = entry;
+            else servers.push(entry);
+            localStorage.setItem('mcp_servers', JSON.stringify(servers));
+            
+            nameEl.value = '';
+            urlEl.value = '';
+            keyEl.value = '';
+            loadMcpServers();
+        } else {
+            statusEl.innerHTML = `<span style="color:#e94560;">❌ 连接失败: ${data.error || '未知错误'}</span>`;
+        }
+    } catch (e) {
+        statusEl.innerHTML = `<span style="color:#e94560;">❌ 请求失败: ${e.message}</span>`;
+    }
+}
+
+async function disconnectMcpServer(name) {
+    if (!confirm(`确定断开 MCP 服务器「${name}」？`)) return;
+    
+    try {
+        let servers = JSON.parse(localStorage.getItem('mcp_servers') || '[]');
+        servers = servers.filter(s => s.name !== name);
+        localStorage.setItem('mcp_servers', JSON.stringify(servers));
+        loadMcpServers();
+    } catch (e) {
+        alert('断开失败: ' + e.message);
     }
 }
 

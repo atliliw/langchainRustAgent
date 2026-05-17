@@ -88,7 +88,12 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub upload_dir: String,
+    /// MCP 服务端口（标准 MCP 协议，供外部 AI Agent 连接）
+    #[serde(default = "default_mcp_port")]
+    pub mcp_port: u16,
 }
+
+fn default_mcp_port() -> u16 { 8093 }
 
 /// OpenAI / LLM API 配置
 #[derive(Debug, Clone, Deserialize)]
@@ -246,6 +251,7 @@ impl Config {
                 host: "0.0.0.0".to_string(),
                 port: 8080,
                 upload_dir: "uploads".to_string(),
+                mcp_port: 8093,
             },
             openai: OpenAIConfig {
                 api_key,
@@ -387,6 +393,7 @@ mod tests {
                 host: "0.0.0.0".to_string(),
                 port: 8080,
                 upload_dir: "uploads".to_string(),
+                mcp_port: 8093,
             },
             openai: OpenAIConfig {
                 api_key: "test-key".to_string(),

@@ -10,6 +10,8 @@
 use crate::config::Config;
 use crate::handlers::ApiErrorResponse;
 use crate::models::{ChunkStrategy, UploadResponse};
+use crate::services::mcp::mcp_bridge::McpBridge;
+use crate::services::mcp::mcp_server::McpServerService;
 use crate::services::ApiService;
 use axum::{
     extract::{Multipart, State},
@@ -18,11 +20,11 @@ use axum::{
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// 全局状态：存放 API 服务和配置
-/// 在 main.rs 创建，通过 Axum 的 State 注入到每个处理函数
 pub struct AppState {
-    pub api: Arc<ApiService>,  // API 业务服务（核心逻辑）
-    pub config: Config,         // 配置
+    pub api: Arc<ApiService>,
+    pub config: Config,
+    pub mcp_bridge: Arc<McpBridge>,
+    pub mcp_server: McpServerService,
 }
 
 /// 处理文件上传

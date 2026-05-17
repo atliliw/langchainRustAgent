@@ -152,7 +152,7 @@ pub async fn agent_plan(
     let use_rag = request["use_rag"].as_bool().unwrap_or(false);
     let use_routing = request["use_routing"].as_bool().unwrap_or(false);
     let use_subgraph = request["use_subgraph"].as_bool().unwrap_or(false);
-    let result = state.api.agent_plan(task, use_rag, use_routing, use_subgraph).await?;
+    let result = state.api.agent_plan(task, use_rag, use_routing, use_subgraph, Some(state.mcp_bridge.clone())).await?;
     Ok(Json(result))
 }
 
@@ -166,7 +166,7 @@ pub async fn agent_execute(
     let use_rag = request["use_rag"].as_bool().unwrap_or(false);
     let use_verify = request["use_verify"].as_bool().unwrap_or(false);
     let use_subgraph = request["use_subgraph"].as_bool().unwrap_or(false);
-    let (sid, results, has_next) = state.api.agent_batch_start(task, tasks, use_rag, use_verify, use_subgraph).await?;
+    let (sid, results, has_next) = state.api.agent_batch_start(task, tasks, use_rag, use_verify, use_subgraph, Some(state.mcp_bridge.clone())).await?;
     Ok(Json(serde_json::json!({"session_id":sid,"results":results,"has_next":has_next})))
 }
 
@@ -175,7 +175,7 @@ pub async fn agent_next(
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, ApiErrorResponse> {
     let sid = request["session_id"].as_str().unwrap_or("");
-    let (results, has_next) = state.api.agent_batch_next(sid).await?;
+    let (results, has_next) = state.api.agent_batch_next(sid, Some(state.mcp_bridge.clone())).await?;
     Ok(Json(serde_json::json!({"results":results,"has_next":has_next})))
 }
 
@@ -265,7 +265,7 @@ pub async fn agent_inject(
 ) -> Result<Json<InjectResponse>, ApiErrorResponse> {
     let sid = request["session_id"].as_str().unwrap_or("").to_string();
     let new_task = request["new_task"].as_str().unwrap_or("").to_string();
-    let result = state.api.agent_inject(&sid, new_task).await?;
+    let result = state.api.agent_inject(&sid, new_task, Some(state.mcp_bridge.clone())).await?;
     Ok(Json(result))
 }
 
@@ -308,6 +308,6 @@ pub async fn agent_execute_all(
     let use_rag = request["use_rag"].as_bool().unwrap_or(false);
     let use_verify = request["use_verify"].as_bool().unwrap_or(false);
     let use_subgraph = request["use_subgraph"].as_bool().unwrap_or(false);
-    let result = state.api.agent_execute_all(task, tasks, use_rag, use_verify, use_subgraph).await?;
+    let result = state.api.agent_execute_all(task, tasks, use_rag, use_verify, use_subgraph, Some(state.mcp_bridge.clone())).await?;
     Ok(Json(result))
 }
