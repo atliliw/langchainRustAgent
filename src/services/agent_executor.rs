@@ -433,6 +433,17 @@ impl AgentEngine {
         let names: HashSet<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
         let nodes: Vec<String> = tasks.iter().map(|t| t.name.clone()).collect();
         let mut edges = vec![];
+        let mut routers = vec![];
+
+        // 收集决策节点
+        for task in tasks {
+            if task.task_type == "decision" && !task.routes.is_empty() {
+                routers.push(serde_json::json!({
+                    "name": task.name,
+                    "routes": task.routes,
+                }));
+            }
+        }
 
         // START → 没有依赖的任务（可以直接开始）
         for task in tasks {
@@ -441,14 +452,45 @@ impl AgentEngine {
             }
         }
 
-        // depends_on 边 + 每个任务到 END
+        // depends_on 边（决策节点的路由分支标 type=route）
         for task in tasks {
             for d in &task.depends_on {
                 if names.contains(d.as_str()) {
-                    edges.push(serde_json::json!({"type":"fixed","source":d,"target":task.name}));
+                    if let Some(dec_task) = tasks.iter().find(|t| t.name == *d && t.task_type == "decision") {
+                        let mut route_label = "";
+                        for (key, next_tasks) in &dec_task.routes {
+                            if next_tasks.contains(&task.name) {
+                                route_label = key;
+                                break;
+                            }
+                        }
+                        if !route_label.is_empty() {
+                            edges.push(serde_json::json!({"type":"route","source":d,"target":task.name,"label":route_label}));
+                        } else {
+                            edges.push(serde_json::json!({"type":"fixed","source":d,"target":task.name}));
+                        }
+                    } else {
+                        edges.push(serde_json::json!({"type":"fixed","source":d,"target":task.name}));
+                    }
                 }
             }
-            edges.push(serde_json::json!({"type":"fixed","source":task.name,"target":"__end__"}));
+        }
+
+        // 非路由分支任务到 END
+        for task in tasks {
+            if task.task_type != "decision" && !routers.iter().any(|r| {
+                r["routes"].as_object().map_or(false, |routes| {
+                    routes.values().any(|v| v.as_array().map_or(false, |arr| arr.contains(&serde_json::Value::String(task.name.clone()))))
+                })
+            }) {
+                edges.push(serde_json::json!({"type":"fixed","source":task.name,"target":"__end__"}));
+            }
+        }
+        // 决策节点到 END
+        for task in tasks {
+            if task.task_type == "decision" {
+                edges.push(serde_json::json!({"type":"fixed","source":task.name,"target":"__end__"}));
+            }
         }
 
         if use_subgraph {
@@ -466,12 +508,12 @@ impl AgentEngine {
                 "entry_point": tasks[0].name,
                 "nodes": nodes,
                 "edges": edges,
-                "routers": [],
+                "routers": routers,
                 "subgraph": true,
                 "subgraph_nodes": subgraph_nodes,
             })
         } else {
-            serde_json::json!({"entry_point": tasks[0].name, "nodes": nodes, "edges": edges, "routers": []})
+            serde_json::json!({"entry_point": tasks[0].name, "nodes": nodes, "edges": edges, "routers": routers})
         }
     }
 

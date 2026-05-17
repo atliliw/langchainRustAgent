@@ -1372,30 +1372,45 @@ function renderGraphHtml(structure, annotations) {
     annotations = annotations || {};
     const nodes = structure.nodes || [];
     const edges = structure.edges || [];
+    const routers = structure.routers || [];
+    const routerNames = new Set(routers.map(r => r.name));
     const entry = structure.entry_point || '';
     const isSubgraph = structure.subgraph === true;
-    const subgraphNodes = structure.subgraph_nodes || {};  // { taskName: [{name,tool},...] }
+    const subgraphNodes = structure.subgraph_nodes || {};
     const nodeColors = {};
     nodes.forEach(n => {
         if (n === entry) nodeColors[n] = '#10b981';
+        else if (routerNames.has(n)) nodeColors[n] = '#f59e0b';
         else nodeColors[n] = '#3b82f6';
     });
 
     let html = '<div style="display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px;">';
     html += renderGraphNode('START', '#10b981', 'START', null);
     html += renderArrow();
-    html += renderFlowLevelWithSubgraphs(nodes, edges, entry, nodeColors, annotations, subgraphNodes);
+    html += renderFlowLevelWithSubgraphs(nodes, edges, entry, nodeColors, annotations, subgraphNodes, routers);
     html += renderArrow();
     html += renderGraphNode('END', '#ef4444', 'END', null);
     html += '</div>';
     return html;
 }
 
-function renderFlowLevelWithSubgraphs(nodes, edges, entry, nodeColors, annotations, subgraphNodes) {
+function renderFlowLevelWithSubgraphs(nodes, edges, entry, nodeColors, annotations, subgraphNodes, routers) {
+    const routerNames = new Set((routers || []).map(r => r.name));
+    const routerRoutes = {};
+    (routers || []).forEach(r => { routerRoutes[r.name] = r.routes; });
+
+    // 从决策节点出来的 route 边
+    const routeEdges = edges.filter(e => e.type === 'route');
+    const routeLabels = {};
+    routeEdges.forEach(e => {
+        if (!routeLabels[e.source]) routeLabels[e.source] = [];
+        routeLabels[e.source].push({ target: e.target, label: e.label || '' });
+    });
+
     const depMap = {};
     nodes.forEach(n => {
         const deps = edges.filter(e =>
-            e.type === 'fixed' && e.target === n && e.source !== '__start__' && e.target !== '__end__'
+            (e.type === 'fixed' || e.type === 'route') && e.target === n && e.source !== '__start__' && e.target !== '__end__'
         ).map(e => e.source);
         const taskDef = _agentPlanData && _agentPlanData.tasks ? _agentPlanData.tasks.find(t => t.name === n) : null;
         const realDeps = taskDef ? (taskDef.depends_on || []) : deps;
@@ -1418,6 +1433,8 @@ function renderFlowLevelWithSubgraphs(nodes, edges, entry, nodeColors, annotatio
             const name = level[0];
             if (subgraphNodes[name]) {
                 html += renderSubgraphNode(name, subgraphNodes[name], nodeColors[name] || '#3b82f6', annotations[name] || null);
+            } else if (routerNames.has(name)) {
+                html += renderRouterNode(name, nodeColors[name] || '#f59e0b', routerRoutes[name] || {}, annotations[name] || null);
             } else {
                 html += renderGraphNode(name, nodeColors[name] || '#3b82f6', name, annotations[name] || null);
             }
@@ -1426,13 +1443,52 @@ function renderFlowLevelWithSubgraphs(nodes, edges, entry, nodeColors, annotatio
             level.forEach(name => {
                 if (subgraphNodes[name]) {
                     html += renderSubgraphNode(name, subgraphNodes[name], nodeColors[name] || '#3b82f6', annotations[name] || null);
+                } else if (routerNames.has(name)) {
+                    html += renderRouterNode(name, nodeColors[name] || '#f59e0b', routerRoutes[name] || {}, annotations[name] || null);
                 } else {
                     html += renderGraphNode(name, nodeColors[name] || '#3b82f6', name, annotations[name] || null);
                 }
             });
             html += '</div>';
         }
+        // 在决策节点下方画路由分支标签
+        if (routeLabels[level[0]] && level.length === 1) {
+            const name = level[0];
+            const branches = routeLabels[name];
+            if (branches.length > 0) {
+                const isSingle = branches.length === 1;
+                html += '<div style="display:flex;gap:8px;justify-content:center;margin-top:4px;flex-wrap:wrap;">';
+                branches.forEach(b => {
+                    const isSufficient = b.label === '充分' || b.label === 'sufficient' || b.label === '足够';
+                    html += `<div style="display:flex;flex-direction:column;align-items:center;gap:2px;padding:2px 6px;border-radius:4px;background:${isSufficient ? '#dcfce7' : '#fef3c7'};border:1px solid ${isSufficient ? '#bbf7d0' : '#fde68a'};">
+                        <span style="font-size:10px;font-weight:bold;color:${isSufficient ? '#16a34a' : '#d97706'};">${escapeHtml(b.label)}</span>
+                        <span style="font-size:9px;color:#64748b;">⬇ ${escapeHtml(b.target)}</span>
+                    </div>`;
+                });
+                html += '</div>';
+            }
+        }
     });
+    return html;
+}
+
+function renderRouterNode(name, color, routes, annotation) {
+    const bg = color + '22';
+    const border = color;
+    const routeKeys = Object.keys(routes || {});
+    const routesHtml = routeKeys.map(k => {
+        const isSufficient = k === '充分' || k === '足够';
+        return `<div style="font-size:10px;padding:1px 4px;border-radius:2px;background:${isSufficient ? '#dcfce7' : '#fef3c7'};color:${isSufficient ? '#16a34a' : '#d97706'};margin:1px 0;">${escapeHtml(k)}${routes[k].length ? ' → ' + routes[k].join(',') : ''}</div>`;
+    }).join('');
+    let html = `<div style="display:inline-flex;flex-direction:column;align-items:center;min-width:150px;">`;
+    html += `<div style="background:${bg};border:2px solid ${border};border-radius:10px;padding:6px 12px;text-align:center;position:relative;">`;
+    html += `<div style="position:absolute;top:-8px;left:50%;transform:translateX(-50%);font-size:9px;background:${border};color:white;padding:0 6px;border-radius:3px;">🔀 路由</div>`;
+    html += `<div style="margin-top:4px;font-size:13px;font-weight:bold;color:${border};">${escapeHtml(name)}</div>`;
+    html += `<div style="margin-top:3px;font-size:10px;color:#64748b;text-align:left;">${routesHtml}</div>`;
+    if (annotation) {
+        html += `<div style="font-size:9px;color:#64748b;margin-top:2px;">${escapeHtml(annotation.label || '')}</div>`;
+    }
+    html += `</div></div>`;
     return html;
 }
 
