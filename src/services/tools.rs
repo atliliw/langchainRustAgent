@@ -15,7 +15,7 @@
 use crate::config::Config;
 use crate::stores::QdrantStore;
 use async_trait::async_trait;
-use langchainrust::{language_models::OpenAIChat, schema::Message, core::runnables::Runnable};
+use langchainrust::{language_models::OpenAIChat, schema::Message, core::runnables::Runnable, Embeddings, OpenAIEmbeddings};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -519,6 +519,95 @@ impl Default for ToolRegistry {
     fn default() -> Self {
         Self::default_registry()
     }
+}
+
+// ──── 工具向量检索索引 ────
+
+/// 工具检索索引，用于在大量工具中快速找到与任务相关的 Top-K 个工具
+pub struct ToolIndex {
+    entries: Vec<(String, String)>,  // (name, description)
+    embeddings: Option<Vec<Vec<f32>>>,  // 预计算的向量
+}
+
+impl ToolIndex {
+    pub fn new() -> Self {
+        Self { entries: Vec::new(), embeddings: None }
+    }
+
+    /// 从 ToolRegistry 构建索引（异步初始化，需要 embedding API）
+    pub async fn build(config: &crate::config::Config, extra_tools: Vec<(&str, &str)>) -> Self {
+        let mut entries: Vec<(String, String)> = ToolRegistry::default_registry().list_descriptions()
+            .iter().map(|(n, d)| (n.to_string(), d.to_string())).collect();
+        for (n, d) in extra_tools {
+            entries.push((n.to_string(), d.to_string()));
+        }
+        // 尝试批量计算 embedding
+        let refs: Vec<&str> = entries.iter().map(|(_, d)| d.as_str()).collect();
+        let embeddings = if refs.is_empty() {
+            None
+        } else {
+            let embed_config = config.to_langchain_embeddings_config();
+            let emb = langchainrust::embeddings::OpenAIEmbeddings::new(embed_config);
+            match emb.embed_documents(&refs).await {
+                Ok(embs) => Some(embs),
+                Err(e) => {
+                    tracing::warn!("工具索引 embedding 失败，降级为关键词匹配: {}", e);
+                    None
+                }
+            }
+        };
+        Self { entries, embeddings }
+    }
+
+    /// 检索与 query 最相关的 Top-K 个工具
+    /// 需要传入 config 用于 embedding API 调用
+    pub async fn search(&self, query: &str, k: usize) -> Vec<(&str, &str)> {
+        // 工具少于等于 K 个，直接返回全部
+        if self.entries.len() <= k {
+            return self.entries.iter().map(|(n, d)| (n.as_str(), d.as_str())).collect();
+        }
+        // 有向量索引 → 语义检索
+        if let Some(ref embs) = self.embeddings {
+            // embedding 查询需要 config，从默认配置加载
+            if let Ok(config) = crate::config::Config::load() {
+                let embed_config = config.to_langchain_embeddings_config();
+                let emb = langchainrust::embeddings::OpenAIEmbeddings::new(embed_config);
+                if let Ok(q_emb) = emb.embed_query(query).await {
+                    let mut scored: Vec<(usize, f32)> = embs.iter().enumerate()
+                        .map(|(i, e)| (i, cosine_similarity(&q_emb, e)))
+                        .collect();
+                    scored.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    return scored.iter().take(k).map(|(i, _)| {
+                        (self.entries[*i].0.as_str(), self.entries[*i].1.as_str())
+                    }).collect();
+                }
+            }
+        }
+        // 降级：关键词匹配（query 中的词在描述中出现次数）
+        let query_lower = query.to_lowercase();
+        let keywords: Vec<&str> = query_lower.split_whitespace()
+            .chain(query_lower.split(|c: char| c.is_ascii_punctuation()))
+            .filter(|w| w.len() > 1)
+            .collect();
+        let mut scored: Vec<(usize, usize)> = self.entries.iter().enumerate()
+            .map(|(i, (name, desc))| {
+                let text = format!("{} {}", name, desc).to_lowercase();
+                let score = keywords.iter().filter(|kw| text.contains(*kw)).count();
+                (i, score)
+            }).collect();
+        scored.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        scored.iter().take(k).map(|(i, _)| {
+            (self.entries[*i].0.as_str(), self.entries[*i].1.as_str())
+        }).collect()
+    }
+}
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum();
+    let nb: f32 = b.iter().map(|x| x * x).sum();
+    let denom = na.sqrt() * nb.sqrt();
+    if denom == 0.0 { 0.0 } else { dot / denom }
 }
 
 #[cfg(test)]

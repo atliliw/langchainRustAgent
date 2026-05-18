@@ -52,11 +52,18 @@ async fn main() {
         Some(api.vector_store.clone()),
     );
     
+    // 构建工具检索索引（embedding 失败时自动降级为关键词匹配）
+    let tool_index = langchainrust_agent::services::tools::ToolIndex::build(
+        &config,
+        vec![],
+    ).await;
+    
     let state = Arc::new(AppState {
         api,
         config: config.clone(),
         mcp_bridge: mcp_bridge_for_state,
         mcp_server,
+        tool_index,
     });
     
     // v2 API 路由（所有新功能），先绑定状态再合并

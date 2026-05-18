@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::errors::GraphDemoError;
 use crate::models::*;
 use crate::services::mcp::mcp_bridge::McpBridge;
-use crate::services::tools::{ToolRegistry, ToolContext};
+use crate::services::tools::{ToolRegistry, ToolContext, ToolIndex};
 use crate::services::verify::{CompositeVerifyHook, VerifyHook};
 use crate::stores::QdrantStore;
 use langchainrust::langgraph::{
@@ -307,25 +307,23 @@ impl AgentEngine {
     }
 
     /// ── 规划 ──
-    pub async fn plan(config: &Config, task: String, rag_context: String, use_rag: bool, use_routing: bool, use_subgraph: bool, mcp_bridge: Option<&McpBridge>) -> Result<AgentPlan, GraphDemoError> {
+    pub async fn plan(config: &Config, task: String, rag_context: String, use_rag: bool, use_routing: bool, use_subgraph: bool, mcp_bridge: Option<&McpBridge>, tool_index: Option<&ToolIndex>) -> Result<AgentPlan, GraphDemoError> {
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
-        let registry = ToolRegistry::default_registry();
-        let mut tool_entries: Vec<String> = registry.list_descriptions().iter()
-            .map(|(n,d)| format!("{{\"name\":\"{}\",\"description\":\"{}\"}}", n, d))
-            .collect();
-        // 追加 MCP 工具描述，让 LLM 规划时知道可以调用
-        if let Some(bridge) = mcp_bridge {
-            let adapters = bridge.get_adapter_boxes();
-            for adapter in &adapters {
-                tool_entries.push(format!(
-                    "{{\"name\":\"{}\",\"description\":\"{}\"}}",
-                    adapter.name(),
-                    adapter.description()
-                ));
-            }
-        }
+        // 用工具检索索引找到 Top-20 相关工具（大量工具时避免 prompt 爆炸）
+        let tool_entries: Vec<String> = if let Some(index) = tool_index {
+            index.search(&task, 20).await.iter()
+                .map(|(n, d)| format!("{{\"name\":\"{}\",\"description\":\"{}\"}}", n, d))
+                .collect()
+        } else if let Some(bridge) = mcp_bridge {
+            bridge.get_adapter_boxes().iter().map(|a|
+                format!("{{\"name\":\"{}\",\"description\":\"{}\"}}", a.name(), a.description())
+            ).collect()
+        } else {
+            ToolRegistry::default_registry().list_descriptions().iter()
+                .map(|(n,d)| format!("{{\"name\":\"{}\",\"description\":\"{}\"}}", n, d))
+                .collect()
+        };
         let tj = tool_entries.join(",");
-
         let routing_section = if use_routing {
             "【强制要求】你**必须**在规划中包含一个 type=decision 的「信息是否充分」判断节点。\n\
              决策节点不需要 tool，通过 routes 定义走向。\n\
@@ -1120,7 +1118,8 @@ impl AgentEngine {
             || lower.contains("不需要") || lower.contains("无需") || lower.contains("不必")
             || lower.contains("已足够") || lower.contains("已经可以") || lower.contains("够了")
             || lower.contains("信息充分") || lower.contains("不需补充") || lower.contains("不补充")
-            || lower.contains("充分"));
+            || lower.contains("充分") || lower.contains("满足") || lower.contains("已满足")
+            || lower.contains("可以了"));
         if is_sufficient {
             // 找个空 value 的 route（充分分支不需要额外任务）
             for (k, v) in routes {
@@ -1408,7 +1407,7 @@ impl AgentEngine {
 
     /// ── 兼容旧接口（一次性跑完所有批次） ──
     pub async fn plan_and_execute(config: &Config, task: String, mcp_bridge: Option<Arc<McpBridge>>) -> Result<AgentExecResponse, GraphDemoError> {
-        let plan = Self::plan(config, task.clone(), String::new(), false, false, false, mcp_bridge.as_deref()).await?;
+        let plan = Self::plan(config, task.clone(), String::new(), false, false, false, mcp_bridge.as_deref(), None).await?;
         let (sid, mut all, _) = Self::execute_batch_start(config, task, plan.tasks, String::new(), None, None, false, false, mcp_bridge.clone()).await?;
         loop {
             let (batch, has_more) = Self::execute_batch_next(config, &sid, None, None, mcp_bridge.clone()).await?;

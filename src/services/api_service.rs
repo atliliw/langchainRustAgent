@@ -553,7 +553,7 @@ impl ApiService {
         } else {
             String::new()
         };
-        crate::services::agent_executor::AgentEngine::plan(&self.config, task, rag_context, use_rag, use_routing, use_subgraph, mcp_bridge.as_deref()).await
+        crate::services::agent_executor::AgentEngine::plan(&self.config, task, rag_context, use_rag, use_routing, use_subgraph, mcp_bridge.as_deref(), None).await
             .map_err(|e| ApiError::SearchError(e.to_string()))
     }
     

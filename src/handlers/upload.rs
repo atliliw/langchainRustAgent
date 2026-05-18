@@ -12,6 +12,7 @@ use crate::handlers::ApiErrorResponse;
 use crate::models::{ChunkStrategy, UploadResponse};
 use crate::services::mcp::mcp_bridge::McpBridge;
 use crate::services::mcp::mcp_server::McpServerService;
+use crate::services::tools::ToolIndex;
 use crate::services::ApiService;
 use axum::{
     extract::{Multipart, State},
@@ -25,6 +26,7 @@ pub struct AppState {
     pub config: Config,
     pub mcp_bridge: Arc<McpBridge>,
     pub mcp_server: McpServerService,
+    pub tool_index: ToolIndex,
 }
 
 /// 处理文件上传
