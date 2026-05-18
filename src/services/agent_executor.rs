@@ -11,7 +11,7 @@ use langchainrust::langgraph::{
     AgentState, CompiledGraph, MessageEntry, ParallelInvocation,
     StateGraph, StateSchema, StateUpdate, START, END,
 };
-use langchainrust::{language_models::OpenAIChat, schema::Message, core::runnables::Runnable};
+use langchainrust::{language_models::OpenAIChat, schema::Message, core::runnables::Runnable, core::tools::ToolDefinition};
 use sqlx::SqlitePool;
 use std::collections::{HashSet, HashMap};
 use std::time::Duration;
@@ -390,7 +390,7 @@ impl AgentEngine {
         let r = llm.invoke(vec![Message::human(&p)], None).await.map_err(|e| GraphDemoError::ExecutionError(e.to_string()))?;
         let c = r.content.trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
 
-        let tasks = match Self::parse_tasks(c) {
+        let mut tasks = match Self::parse_tasks(c) {
             Ok(t) => t,
             Err(first_err) => {
                 let fixed = fix_json(c);
@@ -419,6 +419,23 @@ impl AgentEngine {
         };
 
         if tasks.is_empty() { return Err(GraphDemoError::BuildError("规划为空".into())); }
+        // 自动填充决策节点的 routes（LLM 有时会忘记填）
+        for i in 0..tasks.len() {
+            if tasks[i].task_type == "decision" && tasks[i].routes.is_empty() {
+                let task_name = tasks[i].name.clone();
+                let mut web_searches: Vec<String> = Vec::new();
+                for t in &tasks {
+                    if t.depends_on.contains(&task_name) && t.tool == "web_search" {
+                        web_searches.push(t.name.clone());
+                    }
+                }
+                let mut routes = std::collections::HashMap::new();
+                routes.insert("充分".to_string(), Vec::new());
+                routes.insert("不充分".to_string(), web_searches);
+                tasks[i].routes = routes;
+                tracing::info!("自动填充路由：{} 充分=[], 不充分={:?}", tasks[i].name, tasks[i].routes.get("不充分"));
+            }
+        }
         let gs = Self::build_graph_with_subgraph(&tasks, use_subgraph);
         Ok(AgentPlan{original_task:task, tasks, graph_structure:gs})
     }
@@ -433,9 +450,9 @@ impl AgentEngine {
         let mut edges = vec![];
         let mut routers = vec![];
 
-        // 收集决策节点
+        // 收集决策节点（即使 routes 为空也加入，前端需要它来显示橙色路由器节点）
         for task in tasks {
-            if task.task_type == "decision" && !task.routes.is_empty() {
+            if task.task_type == "decision" {
                 routers.push(serde_json::json!({
                     "name": task.name,
                     "routes": task.routes,
@@ -707,10 +724,38 @@ impl AgentEngine {
                             "decision" => {
                                 let decision_llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
                                 let ctx_str = if ctx.is_empty() { "无前置结果".to_string() } else { format!("前置完成的任务结果：\n{}", ctx) };
-                                let r_opts: Vec<String> = at.routes.keys().map(|k| format!("「{}」", k)).collect();
-                                let p = format!("基于以下信息做出判断，只返回决策结果（{}），不要多余内容。\n\n{}\n\n当前决策：{}", r_opts.join(" 或 "), ctx_str, at.description);
-                                match decision_llm.invoke(vec![Message::human(&p)], None).await {
-                                    Ok(r) => { let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0); (r.content.clone(), t, 0u32) }
+                                let p = format!("基于以下信息判断是否足够回答用户问题。\n\n{}\n\n当前决策：{}", ctx_str, at.description);
+                                // 用 Function Calling 约束输出，避免 LLM 输"满足"、"够了"等非标准词
+                                let route_keys: Vec<&str> = at.routes.keys().map(|k| k.as_str()).collect();
+                                let first_key = route_keys.first().copied().unwrap_or("充分");
+                                let second_key = route_keys.get(1).copied().unwrap_or("不充分");
+                                let fc_llm = decision_llm.bind_tools(vec![
+                                    ToolDefinition::new("make_decision", "输出决策结果")
+                                        .with_parameters(serde_json::json!({
+                                            "type": "object",
+                                            "properties": {
+                                                "route": {
+                                                    "type": "string",
+                                                    "enum": [first_key, second_key]
+                                                },
+                                                "reason": {
+                                                    "type": "string",
+                                                    "description": "决策理由"
+                                                }
+                                            },
+                                            "required": ["route", "reason"]
+                                        }))
+                                ]).with_tool_choice("required");
+                                match fc_llm.invoke(vec![Message::human(&p)], None).await {
+                                    Ok(r) => {
+                                        let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
+                                        let route = r.tool_calls.as_ref()
+                                            .and_then(|calls| calls.first())
+                                            .and_then(|call| serde_json::from_str::<serde_json::Value>(call.arguments()).ok())
+                                            .and_then(|args| args["route"].as_str().map(|s| s.to_string()))
+                                            .unwrap_or_else(|| "充分".to_string());
+                                        (route, t, 0u32)
+                                    }
                                     Err(_e) => ("判断失败".to_string(), 0, 0u32),
                                 }
                             }
