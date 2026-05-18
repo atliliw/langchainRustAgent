@@ -216,79 +216,6 @@ static STORE: Mutex<Option<HashMap<String, BatchState>>> = Mutex::new(None);
 fn store() -> &'static Mutex<Option<HashMap<String, BatchState>>> { &STORE }
 
 /// 尝试修复常见 JSON 格式错误
-fn fix_json(input: &str) -> String {
-    let s = input.trim().to_string();
-
-    // 1. 移除 BOM
-    let s = if s.starts_with('\u{feff}') { s[3..].to_string() } else { s };
-
-    // 2. 提取 JSON 边界（跳过前导/后续文本）
-    let s = {
-        let start = s.find(|c| c == '[' || c == '{');
-        let end = s.rfind(|c| c == ']' || c == '}');
-        match (start, end) {
-            (Some(si), Some(ei)) if si <= ei => s[si..=ei].to_string(),
-            _ => return s,
-        }
-    };
-
-    // 3. 修复 JSON 常见问题
-    let mut fixed = s.clone();
-
-    // 3a. 移除尾随逗号：",]" -> "]" 和 ",}" -> "}"
-    loop {
-        let before = fixed.clone();
-        fixed = fixed.replace(",]", "]").replace(",}", "}");
-        if fixed == before { break; }
-    }
-
-    // 3b. 替换单引号为双引号（但不在字符串值内部简单替换）
-    // 简单方法：替换键周围的单引号
-    let mut chars: Vec<char> = fixed.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '\'' {
-            // 检查是否可能是键：前后有 {, , : 等
-            let prev_char = if i > 0 { chars[i-1] } else { '{' };
-            let next_char = if i + 1 < chars.len() { chars[i+1] } else { '}' };
-            if matches!(prev_char, '{' | ',' | ':') || matches!(next_char, ':' | ',' | '}' | ']') {
-                chars[i] = '"';
-            }
-        }
-        i += 1;
-    }
-    fixed = chars.into_iter().collect();
-
-    // 3c. 尝试给未加引号的属性名加引号
-    // 匹配模式 {word: 或 ,word: 其中 word 是字母数字
-    let mut result = String::new();
-    let c2: Vec<char> = fixed.chars().collect();
-    let mut j = 0;
-    while j < c2.len() {
-        // 检查当前位置是否可能是一个未加引号的键的开始
-        if (j == 0 || c2[j-1] == '{' || c2[j-1] == ',') && c2[j].is_ascii_alphabetic() {
-            // 找到键名结束位置
-            let mut k = j;
-            while k < c2.len() && (c2[k].is_alphanumeric() || c2[k] == '_') {
-                k += 1;
-            }
-            // 如果后面跟着 :，说明是未加引号的键
-            if k < c2.len() && c2[k] == ':' {
-                result.push('"');
-                result.extend(&c2[j..k]);
-                result.push('"');
-                j = k;
-                continue;
-            }
-        }
-        result.push(c2[j]);
-        j += 1;
-    }
-    fixed = result;
-
-    fixed
-}
-
 // ── 子图状态类型（独立于父图 AgentState） ──
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchExtractState {
@@ -301,11 +228,6 @@ impl StateSchema for SearchExtractState {}
 pub struct AgentEngine;
 
 impl AgentEngine {
-    fn parse_tasks(s: &str) -> Result<Vec<AgentTask>, String> {
-        serde_json::from_str::<Vec<AgentTask>>(s)
-            .map_err(|e| format!("JSON 格式错误 ({}): \n{}", e, s.chars().take(200).collect::<String>()))
-    }
-
     /// ── 规划 ──
     pub async fn plan(config: &Config, task: String, rag_context: String, use_rag: bool, use_routing: bool, use_subgraph: bool, mcp_bridge: Option<&McpBridge>, tool_index: Option<&ToolIndex>) -> Result<AgentPlan, GraphDemoError> {
         let llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
@@ -366,10 +288,9 @@ impl AgentEngine {
                  1. 把大任务拆成小步骤，每个子任务职责单一\n\
                  2. 可以用 depends_on 表示任务之间的依赖关系\n\
                  3. depends_on 为空的子任务可以并行执行\n\
-                 可用工具：[{}]\n\
-                 返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"task_type\": \"normal\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
-                 任务：{}\n\
-                 只返回JSON。",
+                  可用工具：[{}]\n\
+                  任务：{}\n\
+                  通过 create_task_plan 函数输出规划结果。",
                 rag_context_block, routing_section, tj, task
             )
         } else {
@@ -381,42 +302,133 @@ impl AgentEngine {
                  2. 可以用 depends_on 表示任务之间的依赖关系\n\
                  3. depends_on 为空的子任务可以并行执行\n\
                  可用工具：[{}]\n\
-                 返回JSON：[{{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"task_type\": \"normal\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }}]\n\
                  任务：{}\n\
-                 只返回JSON。",
+                 通过 create_task_plan 函数输出规划结果。",
                 routing_section, tj, task
             )
         };
-        let r = llm.invoke(vec![Message::human(&p)], None).await.map_err(|e| GraphDemoError::ExecutionError(e.to_string()))?;
-        let c = r.content.trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
-
-        let mut tasks = match Self::parse_tasks(c) {
-            Ok(t) => t,
-            Err(first_err) => {
-                let fixed = fix_json(c);
-                match Self::parse_tasks(&fixed) {
-                    Ok(t) => t,
-                    Err(_) => {
-                        tracing::warn!("JSON 格式错误，尝试让 LLM 修正: {}", first_err);
-                        let fix_prompt = format!(
-                            "JSON 格式错误：{}\n\n原始内容：\n```\n{}\n```\n\n请修正为合法 JSON，只返回修正后的 JSON。",
-                            first_err, c
-                        );
-                        match llm.invoke(vec![Message::human(&fix_prompt)], None).await {
-                            Ok(fix_r) => {
-                                let fixed_c = fix_r.content.trim_start_matches("```json")
-                                    .trim_start_matches("```").trim_end_matches("```").trim();
-                                let fixed2 = fix_json(fixed_c);
-                                Self::parse_tasks(&fixed2).map_err(|e| {
-                                    GraphDemoError::BuildError(format!("LLM 修正后 JSON 仍无效: {}", e))
-                                })?
-                            }
-                            Err(e) => return Err(GraphDemoError::BuildError(format!("LLM 修正失败: {}", e))),
+        // ═══════════════════════════════════════════════════════════════
+        //  Function Calling — 规划阶段
+        // ═══════════════════════════════════════════════════════════════
+        //
+        //  作用：让 LLM 输出结构化的子任务列表，而不是自由文本
+        //
+        //  请求体结构（实际发给 API）：
+        //  {
+        //    "model": "qwen-turbo",
+        //    "messages": [{"role": "user", "content": "..."}],
+        //    "tools": [{                                ← 定义 LLM 可用的"函数"
+        //      "type": "function",
+        //      "function": {
+        //        "name": "create_task_plan",            ← 函数名
+        //        "description": "将用户任务拆解为子任务列表",
+        //        "parameters": {                        ← JSON Schema 定义参数格式
+        //          "type": "object",
+        //          "properties": {
+        //            "tasks": {                         ← 数组，每个元素是一个子任务
+        //              "type": "array",
+        //              "items": {
+        //                "properties": {
+        //                  "name":  {"type": "string"},
+        //                  "tool":  {"type": "string"},
+        //                  "task_type": {"enum": ["normal","decision","human_review"]},
+        //                  "depends_on": {"type": "array", "items": {"type": "string"}}
+        //                },
+        //                "required": ["name", "tool", "depends_on"]
+        //              }
+        //            }
+        //          },
+        //          "required": ["tasks"]
+        //        }
+        //      }
+        //    }],
+        //    "tool_choice": "required"                   ← 强制 LLM 必须调函数，不能返回文本
+        //  }
+        //
+        //  LLM 返回（content 为 null，数据在 tool_calls 里）：
+        //  {
+        //    "content": null,
+        //    "tool_calls": [{
+        //      "function": {
+        //        "name": "create_task_plan",
+        //        "arguments": "{\"tasks\":[{...},{...}]}"  ← arguments 是 JSON 字符串
+        //      }
+        //    }]
+        //  }
+        //
+        //  解析流程：
+        //    arguments (字符串) → serde_json::from_str → Value
+        //    → value["tasks"] → serde_json::from_value → Vec<AgentTask>
+        //
+        // ───────────────────────────────────────────────────────────
+        //  定义 tool（答题卡）
+        // ───────────────────────────────────────────────────────────
+        // 定义 tool：create_task_plan ──────────────────────────────
+        // 这个 tool 告诉 LLM "你必须输出 tasks 数组，里面放拆解好的子任务"
+        // LLM 收到后不会返回文本，而是在 tool_calls 里返回 arguments
+        // ──────────────────────────────────────────────────────────
+        let plan_tool = ToolDefinition::new("create_task_plan", "将用户任务拆解为子任务列表")
+            .with_parameters(serde_json::json!({
+                "type": "object",                          // 参数类型固定为 object
+                "properties": {
+                    "tasks": {                              // 唯一的顶级字段：tasks 数组
+                        "type": "array",                    // tasks 是个数组
+                        "items": {                          // 数组里每个元素的结构
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "子任务名（中文）"},
+                                "description": {"type": "string", "description": "做什么"},
+                                "tool": {"type": "string", "description": "工具名（rag_search/web_search/llm_query 等）"},
+                                "task_type": {               // 任务类型
+                                    "type": "string",
+                                    "enum": ["normal", "decision", "human_review"]  // 只能选这三个
+                                },
+                                "depends_on": {               // 依赖的前置任务名列表
+                                    "type": "array",
+                                    "items": {"type": "string"}
+                                },
+                                "input_template": {"type": "string"},  // 输入模板
+                                "routes": {                              // 仅 decision 类型需要
+                                    "type": "object",
+                                    "description": "决策节点的路由表",
+                                    "additionalProperties": {
+                                        "type": "array",
+                                        "items": {"type": "string"}
+                                    }
+                                }
+                            },
+                            "required": ["name", "tool", "depends_on"]  // 这三个字段必填
                         }
                     }
-                }
-            }
-        };
+                },
+                "required": ["tasks"]                      // 顶级必须包含 tasks 字段
+            }));
+        // ───────────────────────────────────────────────────────────
+        //  绑定 tool + 强制调函数 → 调用 LLM
+        // ───────────────────────────────────────────────────────────
+        //  bind_tools() → 把 tool 定义注入 LLM 的 config
+        //  with_tool_choice("required") → LLM 必须用 tool_calls 返回，不能返回文本 content
+        //  invoke() → 发 HTTP 请求给 API
+        // ───────────────────────────────────────────────────────────
+        let fc_llm = llm.bind_tools(vec![plan_tool]).with_tool_choice("required");
+        let r = fc_llm.invoke(vec![Message::human(&p)], None).await.map_err(|e| GraphDemoError::ExecutionError(e.to_string()))?;
+        // ───────────────────────────────────────────────────────────
+        //  解析 tool_calls
+        // ───────────────────────────────────────────────────────────
+        //  r.tool_calls       → Option<Vec<ToolCall>>
+        //  calls.first()      → Option<&ToolCall>（取第一个）
+        //  call.arguments()   → &str（JSON 字符串）
+        //  from_str → Value   → 解析 JSON 字符串
+        //  value["tasks"]     → 取 tasks 字段
+        //  from_value → Vec<AgentTask> → 反序列化为 Rust 结构体
+        // ───────────────────────────────────────────────────────────
+        let mut tasks: Vec<AgentTask> = r.tool_calls.as_ref()
+            .and_then(|calls| calls.first())
+            .and_then(|call| {
+                let args: serde_json::Value = serde_json::from_str(call.arguments()).ok()?;
+                serde_json::from_value(args["tasks"].clone()).ok()
+            })
+            .unwrap_or_default();
 
         if tasks.is_empty() { return Err(GraphDemoError::BuildError("规划为空".into())); }
         // 自动填充决策节点的 routes（LLM 有时会忘记填）
@@ -725,30 +737,71 @@ impl AgentEngine {
                                 let decision_llm = OpenAIChat::new(config.to_langchain_openai_config().with_max_tokens(1024));
                                 let ctx_str = if ctx.is_empty() { "无前置结果".to_string() } else { format!("前置完成的任务结果：\n{}", ctx) };
                                 let p = format!("基于以下信息判断是否足够回答用户问题。\n\n{}\n\n当前决策：{}", ctx_str, at.description);
-                                // 用 Function Calling 约束输出，避免 LLM 输"满足"、"够了"等非标准词
+                                // ═══════════════════════════════════════════════════
+                                //  Function Calling — 决策节点
+                                // ═══════════════════════════════════════════════════
+                                //  作用：约束 LLM 只能输出 "充分" 或 "不充分"
+                                //
+                                //  发给 API 的请求体：
+                                //  {
+                                //    "messages": [{"role":"user","content":"..."}],
+                                //    "tools": [{
+                                //      "type":"function",
+                                //      "function": {
+                                //        "name": "make_decision",
+                                //        "parameters": {
+                                //          "properties": {
+                                //            "route": {"enum": ["充分","不充分"]},  ← 锁死
+                                //            "reason": {"type":"string"}
+                                //          },
+                                //          "required": ["route"]
+                                //        }
+                                //      }
+                                //    }],
+                                //    "tool_choice": "required"
+                                //  }
+                                //
+                                //  LLM 返回：
+                                //  {"tool_calls":[{"function":{"arguments":"{\"route\":\"充分\"}"}}]}
+                                // ───────────────────────────────────────────────────
                                 let route_keys: Vec<&str> = at.routes.keys().map(|k| k.as_str()).collect();
                                 let first_key = route_keys.first().copied().unwrap_or("充分");
                                 let second_key = route_keys.get(1).copied().unwrap_or("不充分");
+                                // 定义 tool：make_decision ────────────────────
+                                // 约束 LLM 只能输出 {"route":"充分"} 或 {"route":"不充分"}
+                                // ─────────────────────────────────────────────
+                                //  bind_tools → 把 tool 定义注入 LLM 的 config
+                                //  with_tool_choice("required") → 强制走 tool_calls
+                                //  invoke → 发 HTTP 请求给 API
+                                // ─────────────────────────────────────────────
                                 let fc_llm = decision_llm.bind_tools(vec![
                                     ToolDefinition::new("make_decision", "输出决策结果")
                                         .with_parameters(serde_json::json!({
-                                            "type": "object",
+                                            "type": "object",              // 参数固定为 object
                                             "properties": {
-                                                "route": {
+                                                "route": {                  // 路由结果
                                                     "type": "string",
-                                                    "enum": [first_key, second_key]
+                                                    "enum": [first_key, second_key]  // ← LLM 只能二选一
                                                 },
-                                                "reason": {
+                                                "reason": {                 // 决策理由（LLM 自由发挥）
                                                     "type": "string",
                                                     "description": "决策理由"
                                                 }
                                             },
-                                            "required": ["route", "reason"]
+                                            "required": ["route", "reason"]  // 两个字段都要填
                                         }))
                                 ]).with_tool_choice("required");
                                 match fc_llm.invoke(vec![Message::human(&p)], None).await {
                                     Ok(r) => {
                                         let t = r.token_usage.as_ref().map(|u| u.total_tokens).unwrap_or(0);
+                                        // ──────────────────────────────────
+                                        //  解析 tool_calls：
+                                        //    r.tool_calls → Option<Vec<ToolCall>>
+                                        //    calls.first() → 取第一个
+                                        //    call.arguments() → JSON 字符串
+                                        //    from_str → Value → 解析
+                                        //    args["route"] → "充分"或"不充分"
+                                        // ──────────────────────────────────
                                         let route = r.tool_calls.as_ref()
                                             .and_then(|calls| calls.first())
                                             .and_then(|call| serde_json::from_str::<serde_json::Value>(call.arguments()).ok())
